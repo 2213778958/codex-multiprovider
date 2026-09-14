@@ -76,10 +76,55 @@ cargo build -p codex-cli --bin codex
 
 ### 1. 编译引擎
 
+一条命令，从零到打好补丁的 `codex.exe`——它会按钉住的提交克隆上游引擎、打补丁、然后编译：
+
 ```powershell
+powershell -ExecutionPolicy Bypass -File tools\install-engine.ps1
+```
+
+也可以直接双击 `tools\install-engine.cmd`。编完用这个核对：
+
+```powershell
+node tools\routing-e2e.mjs "<codex.exe 路径>" "<含该配置的 CODEX_HOME>"
+```
+
+想手动做也行：
+
+```powershell
+git clone https://github.com/openai/codex.git
+cd codex
+git checkout 1715e55076737158ba61d43158ede504de6d4ce1   # 补丁就是针对这个提交生成的
+git apply ..\patch\model-provider-routes.patch
 cd codex-rs
 cargo build -p codex-cli --bin codex
 ```
+
+脚本需要 `git` 和 `cargo` 在 `PATH` 上，缺哪个会直接停下并给出安装提示。它**不会**去动一个不干净、
+或不在钉住提交上的 checkout。
+
+#### 关于 Rust，以及下载慢怎么办
+
+光有 `git` 不够——引擎是 Rust 写的，所以还需要工具链：
+
+1. 从 <https://rustup.rs> 安装 Rust。Windows 上安装器会检测到缺失的 MSVC C++ 生成工具并主动提出帮你装，
+   接受它，装完重开一个终端。
+2. 就这些。`codex-rs\rust-toolchain.toml` 钉死了编译器版本，你第一次在这个 checkout 里编译时 rustup
+   会自动把对应版本装上。
+
+接下来 `cargo build` 要从 crates.io 拉几百个 crate。如果你那里慢或连不上，**在你自己的终端里**把工具
+指向镜像——本项目从不改你的全局配置：
+
+```powershell
+# cargo：只对当前终端会话使用 crates.io 镜像
+$env:CARGO_REGISTRIES_CRATES_IO_INDEX = "sparse+https://rsproxy.cn/index/"
+# rustup：从镜像获取工具链（两个都要设，且要在运行 rustup 之前设）
+$env:RUSTUP_DIST_SERVER = "https://rsproxy.cn"
+$env:RUSTUP_UPDATE_ROOT = "https://rsproxy.cn/rustup"
+# git：GitHub 被墙时走代理
+git -c http.proxy=http://127.0.0.1:7890 clone https://github.com/openai/codex.git
+```
+
+首次编译大约产出 10 GB 构建产物、耗时 10~30 分钟（取决于机器）。之后的编译是增量的，几秒就好。
 
 ### 2. 一次性保存供应商 key
 

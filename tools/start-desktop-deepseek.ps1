@@ -39,13 +39,19 @@ $ErrorActionPreference = 'Stop'
 
 # Resolve the engine: explicit parameter first, then the usual in-tree build next to this checkout.
 if (-not $CodexExe) {
-    $candidates = @(
-        (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'codex-rs\target\debug\codex.exe'),
-        (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) 'codex-rs\target\debug\codex.exe')
+    # Prefer a release build: that is what install-engine.ps1 produces and it runs noticeably faster.
+    # A debug build stays usable as the fallback for development.
+    $engineRoots = @(
+        (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'codex-rs\target'),
+        (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) 'codex-rs\target')
     )
+    $candidates = foreach ($root in $engineRoots) {
+        (Join-Path $root 'release\codex.exe')
+        (Join-Path $root 'debug\codex.exe')
+    }
     $CodexExe = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if (-not $CodexExe) {
-        throw "Patched engine not found. Pass -CodexExe <path to codex.exe>; build it with: cargo build -p codex-cli --bin codex"
+        throw "Patched engine not found. Build it with tools\install-engine.ps1, or pass -CodexExe <path to codex.exe>."
     }
 }
 

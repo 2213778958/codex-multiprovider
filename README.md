@@ -79,10 +79,58 @@ file has to contain both providers' models; `tools/merge-model-catalogs.mjs` bui
 
 ### 1. Build the engine
 
+One command, from nothing to a patched `codex.exe`. It clones the upstream engine at the pinned
+commit, applies the patch, and builds it:
+
 ```powershell
+powershell -ExecutionPolicy Bypass -File tools\install-engine.ps1
+```
+
+Or double-click `tools\install-engine.cmd`. Verify the result with:
+
+```powershell
+node tools\routing-e2e.mjs "<path to codex.exe>" "<a CODEX_HOME with the config>"
+```
+
+Doing it by hand instead:
+
+```powershell
+git clone https://github.com/openai/codex.git
+cd codex
+git checkout 1715e55076737158ba61d43158ede504de6d4ce1   # the commit the patch was generated against
+git apply ..\patch\model-provider-routes.patch
 cd codex-rs
 cargo build -p codex-cli --bin codex
 ```
+
+The script needs `git` and `cargo` on `PATH`; it stops with an install hint if either is missing.
+It will **not** touch a checkout that is dirty or not at the pinned commit.
+
+#### Rust, and when the downloads are slow
+
+`git` is not enough on its own — the engine is Rust, so you also need the toolchain:
+
+1. Install Rust from <https://rustup.rs>. On Windows the installer detects the missing MSVC C++
+   build tools and offers to install them for you; accept that, and reopen your shell afterwards.
+2. That is all. `codex-rs\rust-toolchain.toml` pins the exact compiler version, and rustup installs
+   it automatically the first time you build inside the checkout.
+
+`cargo build` then pulls a few hundred crates from crates.io. If that is slow or unreachable where
+you are, point the tools at a mirror **in your own shell** — this project never rewrites your global
+config:
+
+```powershell
+# cargo: use a crates.io mirror for this shell only
+$env:CARGO_REGISTRIES_CRATES_IO_INDEX = "sparse+https://rsproxy.cn/index/"
+# rustup: fetch toolchains from a mirror (set both, before running rustup)
+$env:RUSTUP_DIST_SERVER = "https://rsproxy.cn"
+$env:RUSTUP_UPDATE_ROOT = "https://rsproxy.cn/rustup"
+# git: reach GitHub through a proxy if it is blocked
+git -c http.proxy=http://127.0.0.1:7890 clone https://github.com/openai/codex.git
+```
+
+Expect roughly 10 GB of build output and 10-30 minutes for the first build, depending on the
+machine. Later builds are incremental and take seconds.
 
 ### 2. Store the provider key once
 
@@ -242,8 +290,12 @@ yet, starts the compatibility proxy if it is not already healthy (`-SkipProxy` o
 the provider's `base_url` does not point at the proxy, then sets the engine override for that
 session only and starts the client.
 
+The launcher picks the engine itself and prefers `target\release\codex.exe`, falling back to
+`target\debug\codex.exe`, so a development build stays usable without changing the shortcut. Pass
+`-CodexExe <path>` to force a specific binary.
+
 Useful switches: `-ValidateOnly` (report engine, key, proxy, and provider URL without starting
-anything), `-SkipProxy`, `-Detach`, `-ProxyPort`.
+anything), `-CodexExe`, `-SkipProxy`, `-Detach`, `-ProxyPort`.
 
 Stop the proxy with `tools\stop-proxy.ps1`. Revert by removing the `base_url` override (restores the
 stock provider URL; subagent tasks stop arriving again).
