@@ -1,0 +1,18 @@
+# Generated model catalogs: never commit these. They are derived from OpenAI account data
+# and may embed bundled instruction text.
+merged-models.json
+models_cache.json
+*models.json
+
+# Credentials and local state
+auth.json
+.env
+.env.*
+*.key
+
+# Local scratch space
+work/
+node_modules/
+
+# Keep the hand-written example catalog
+!config/example-models.json

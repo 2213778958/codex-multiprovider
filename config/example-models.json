@@ -1,0 +1,26 @@
+{
+  "models": [
+    {
+      "slug": "deepseek-flash",
+      "display_name": "DeepSeek-Flash",
+      "description": "Replace slug/display name with what your provider actually serves.",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        { "effort": "low", "description": "Fast" },
+        { "effort": "medium", "description": "Balanced" },
+        { "effort": "high", "description": "Deep" }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 100,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "truncation_policy": { "mode": "bytes", "limit": 10000 },
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are a coding agent operating inside the user's project. Use the available tools to inspect and change files, keep edits minimal and focused, and answer in the language the user writes in. State clearly what you changed and why."
+      }
+    }
+  ]
+}

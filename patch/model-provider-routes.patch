@@ -1,0 +1,576 @@
+diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
+index 9e73f535a6..5d460a34e9 100644
+--- a/codex-rs/app-server/src/request_processors.rs
++++ b/codex-rs/app-server/src/request_processors.rs
+@@ -630,6 +630,25 @@ fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>,
+     .transpose()
+ }
+ 
++/// Rejects a model that config routes to a provider other than the one a session is pinned to.
++///
++/// Models absent from `model_provider_routes` are unrestricted, so configurations that do not
++/// declare routes keep their previous behavior.
++pub(crate) fn ensure_model_routed_to_provider(
++    model_provider_routes: &HashMap<String, String>,
++    provider_id: &str,
++    model: &str,
++) -> Result<(), JSONRPCErrorError> {
++    if let Some(routed_provider) = model_provider_routes.get(model)
++        && routed_provider != provider_id
++    {
++        return Err(invalid_request(format!(
++            "model `{model}` is routed to model provider `{routed_provider}` and cannot run on `{provider_id}`"
++        )));
++    }
++    Ok(())
++}
++
+ fn resolve_turn_environment_selections(
+     thread_manager: &ThreadManager,
+     environments: Option<Vec<TurnEnvironmentParams>>,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index de98fc7cde..ed985efe15 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -276,6 +276,17 @@ fn has_model_resume_override(
+             .is_some_and(|overrides| overrides.contains_key("model_reasoning_effort"))
+ }
+ 
++/// Reads a model-related override out of the raw `config` map accepted by thread requests.
++fn request_config_string(
++    request_overrides: Option<&HashMap<String, serde_json::Value>>,
++    key: &str,
++) -> Option<String> {
++    request_overrides?
++        .get(key)
++        .and_then(serde_json::Value::as_str)
++        .map(str::to_string)
++}
++
+ fn has_permission_override(
+     request_overrides: Option<&HashMap<String, serde_json::Value>>,
+     typesafe_overrides: &ConfigOverrides,
+@@ -1205,6 +1216,21 @@ impl ThreadRequestProcessor {
+             personality,
+         );
+         typesafe_overrides.ephemeral = ephemeral;
++        let requested_model = typesafe_overrides
++            .model
++            .clone()
++            .or_else(|| request_config_string(config.as_ref(), "model"));
++        let requested_provider = typesafe_overrides
++            .model_provider
++            .clone()
++            .or_else(|| request_config_string(config.as_ref(), "model_provider"));
++        if let Some(provider_id) = self.resolve_thread_model_provider(
++            /*pinned_provider*/ None,
++            requested_model.as_deref(),
++            requested_provider.as_deref(),
++        )? {
++            typesafe_overrides.model_provider = Some(provider_id);
++        }
+         let listener_task_context = ListenerTaskContext {
+             thread_manager: Arc::clone(&self.thread_manager),
+             thread_state_manager: self.thread_state_manager.clone(),
+@@ -1669,6 +1695,54 @@ impl ThreadRequestProcessor {
+         }
+     }
+ 
++    /// Resolves the model provider for a requested model and rejects cross-provider selections.
++    ///
++    /// The desktop client picks a model without naming its provider, so `model_provider_routes`
++    /// from config is the routing source of truth. `pinned_provider` is the provider a session has
++    /// already committed to; a session may only run models routed to that provider.
++    fn resolve_thread_model_provider(
++        &self,
++        pinned_provider: Option<&str>,
++        model: Option<&str>,
++        requested_provider: Option<&str>,
++    ) -> Result<Option<String>, JSONRPCErrorError> {
++        if let (Some(pinned_provider), Some(requested_provider)) =
++            (pinned_provider, requested_provider)
++            && pinned_provider != requested_provider
++        {
++            return Err(invalid_request(format!(
++                "session is pinned to model provider `{pinned_provider}` and cannot switch to `{requested_provider}`"
++            )));
++        }
++        let Some(model) = model else {
++            return Ok(requested_provider.or(pinned_provider).map(str::to_string));
++        };
++        let routed_provider = self
++            .config
++            .model_provider_routes
++            .get(model)
++            .map(String::as_str);
++        if let (Some(requested_provider), Some(routed_provider)) =
++            (requested_provider, routed_provider)
++            && requested_provider != routed_provider
++        {
++            return Err(invalid_request(format!(
++                "model `{model}` is routed to model provider `{routed_provider}` and cannot run on `{requested_provider}`"
++            )));
++        }
++        if let Some(pinned_provider) = pinned_provider {
++            ensure_model_routed_to_provider(
++                &self.config.model_provider_routes,
++                pinned_provider,
++                model,
++            )?;
++        }
++        Ok(routed_provider
++            .or(requested_provider)
++            .or(pinned_provider)
++            .map(str::to_string))
++    }
++
+     async fn thread_archive_inner(
+         &self,
+         params: ThreadArchiveParams,
+@@ -3846,6 +3920,27 @@ impl ThreadRequestProcessor {
+             )
+             .await;
+ 
++        if has_explicit_model_resume_override {
++            let requested_model = typesafe_overrides
++                .model
++                .clone()
++                .or_else(|| request_config_string(request_overrides.as_ref(), "model"));
++            let requested_provider = typesafe_overrides
++                .model_provider
++                .clone()
++                .or_else(|| request_config_string(request_overrides.as_ref(), "model_provider"));
++            let pinned_provider = persisted_metadata
++                .as_ref()
++                .map(|metadata| metadata.model_provider.as_str());
++            if let Some(provider_id) = self.resolve_thread_model_provider(
++                pinned_provider,
++                requested_model.as_deref(),
++                requested_provider.as_deref(),
++            )? {
++                typesafe_overrides.model_provider = Some(provider_id);
++            }
++        }
++
+         let clear_reasoning_effort = !has_explicit_model_resume_override
+             && persisted_metadata
+                 .as_ref()
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 95e1d62f5c..bde3a768d4 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -930,6 +930,14 @@ impl TurnRequestProcessor {
+         let (_, thread) = self.load_thread(&params.thread_id).await?;
+         self.ensure_direct_input_allowed(request_id, thread.as_ref())
+             .await?;
++        if let Some(model) = params.model.as_deref() {
++            let thread_config = thread.config().await;
++            ensure_model_routed_to_provider(
++                &self.config.model_provider_routes,
++                &thread_config.model_provider_id,
++                model,
++            )?;
++        }
+         let cwd = resolve_request_cwd(params.cwd)?;
+         let environment_override = self
+             .build_environment_override(
+diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
+index 73928ce666..e04421258b 100644
+--- a/codex-rs/app-server/tests/suite/v2/mod.rs
++++ b/codex-rs/app-server/tests/suite/v2/mod.rs
+@@ -74,6 +74,8 @@ mod model_list;
+ mod model_provider_capabilities_read;
+ #[path = "model_provider_enforcement_tests.rs"]
+ mod model_provider_enforcement;
++#[path = "model_provider_routing_tests.rs"]
++mod model_provider_routing;
+ mod multi_agent_v2_developer_instructions;
+ mod otel;
+ mod output_schema;
+diff --git a/codex-rs/app-server/tests/suite/v2/model_provider_routing_tests.rs b/codex-rs/app-server/tests/suite/v2/model_provider_routing_tests.rs
+new file mode 100644
+index 0000000000..a2338646e1
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/v2/model_provider_routing_tests.rs
+@@ -0,0 +1,203 @@
++//! Verifies that a model listed in `model_provider_routes` runs on the provider that serves it
++//! and that a session which is already pinned to a provider cannot switch providers.
++
++use anyhow::Result;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use app_test_support::create_fake_rollout;
++use codex_app_server_protocol::RequestId;
++use codex_app_server_protocol::ThreadSettingsUpdateParams;
++use codex_app_server_protocol::ThreadStartParams;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use tempfile::TempDir;
++use wiremock::MockServer;
++
++const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
++
++/// Config that pins `deepseek-flash` to a second provider next to the default mock provider.
++fn routed_model_provider_config(deepseek_uri: &str) -> String {
++    format!(
++        r#"
++[model_providers.deepseek]
++name = "DeepSeek"
++base_url = "{deepseek_uri}/v1"
++wire_api = "responses"
++
++[model_provider_routes]
++deepseek-flash = "deepseek"
++"#
++    )
++}
++
++async fn routed_test_server() -> Result<(MockServer, TempDir, TestAppServer)> {
++    let default_provider = MockServer::start().await;
++    let deepseek = MockServer::start().await;
++    let home = TempDir::new()?;
++    MockResponsesConfig::new(&default_provider.uri())
++        .with_extra_config(&routed_model_provider_config(&deepseek.uri()))
++        .write(home.path())?;
++    let server = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .build_initialized()
++        .await?;
++    Ok((deepseek, home, server))
++}
++
++#[tokio::test]
++async fn thread_start_routes_a_configured_model_to_its_provider() -> Result<()> {
++    let (_deepseek, _home, mut server) = routed_test_server().await?;
++
++    let started = server
++        .start_thread(ThreadStartParams {
++            model: Some("deepseek-flash".to_string()),
++            ..Default::default()
++        })
++        .await?;
++
++    assert_eq!(started.model, "deepseek-flash");
++    assert_eq!(started.model_provider, "deepseek");
++    Ok(())
++}
++
++#[tokio::test]
++async fn thread_start_rejects_a_model_requested_on_another_provider() -> Result<()> {
++    let (_deepseek, _home, mut server) = routed_test_server().await?;
++
++    let id = server
++        .send_raw_request(
++            "thread/start",
++            Some(json!({
++                "model": "deepseek-flash",
++                "modelProvider": "mock_provider",
++            })),
++        )
++        .await?;
++    let error = server
++        .read_stream_until_error_message(RequestId::Integer(id))
++        .await?;
++
++    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
++    assert_eq!(
++        error.error.message,
++        "model `deepseek-flash` is routed to model provider `deepseek` and cannot run on `mock_provider`"
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn thread_start_keeps_the_default_provider_for_unrouted_models() -> Result<()> {
++    let (_deepseek, _home, mut server) = routed_test_server().await?;
++
++    let started = server
++        .start_thread(ThreadStartParams {
++            model: Some("mock-model".to_string()),
++            ..Default::default()
++        })
++        .await?;
++
++    assert_eq!(started.model, "mock-model");
++    assert_eq!(started.model_provider, "mock_provider");
++    Ok(())
++}
++
++#[tokio::test]
++async fn thread_resume_rejects_a_model_routed_to_another_provider() -> Result<()> {
++    let (_deepseek, home, mut server) = routed_test_server().await?;
++    let thread_id = create_fake_rollout(
++        home.path(),
++        "2025-05-07T12-00-00",
++        "2025-05-07T12:00:00Z",
++        "routing resume",
++        Some("mock_provider"),
++        /*git_info*/ None,
++    )?;
++
++    let id = server
++        .send_raw_request(
++            "thread/resume",
++            Some(json!({
++                "threadId": thread_id,
++                "model": "deepseek-flash",
++            })),
++        )
++        .await?;
++    let error = server
++        .read_stream_until_error_message(RequestId::Integer(id))
++        .await?;
++
++    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
++    assert_eq!(
++        error.error.message,
++        "model `deepseek-flash` is routed to model provider `deepseek` and cannot run on `mock_provider`"
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn thread_resume_without_a_model_override_keeps_the_pinned_provider() -> Result<()> {
++    let (_deepseek, home, mut server) = routed_test_server().await?;
++    let thread_id = create_fake_rollout(
++        home.path(),
++        "2025-05-07T12-00-01",
++        "2025-05-07T12:00:01Z",
++        "pinned resume",
++        Some("mock_provider"),
++        /*git_info*/ None,
++    )?;
++
++    let id = server
++        .send_raw_request("thread/resume", Some(json!({ "threadId": thread_id })))
++        .await?;
++    let resumed: codex_app_server_protocol::ThreadResumeResponse = server.read_response(id).await?;
++
++    assert_eq!(resumed.model_provider, "mock_provider");
++    Ok(())
++}
++
++#[tokio::test]
++async fn thread_settings_update_rejects_a_model_routed_to_another_provider() -> Result<()> {
++    let (_deepseek, _home, mut server) = routed_test_server().await?;
++    let started = server.start_thread(ThreadStartParams::default()).await?;
++
++    let id = server
++        .send_raw_request(
++            "thread/settings/update",
++            Some(json!({
++                "threadId": started.thread.id,
++                "model": "deepseek-flash",
++            })),
++        )
++        .await?;
++    let error = server
++        .read_stream_until_error_message(RequestId::Integer(id))
++        .await?;
++
++    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
++    assert_eq!(
++        error.error.message,
++        "model `deepseek-flash` is routed to model provider `deepseek` and cannot run on `mock_provider`"
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn thread_settings_update_accepts_an_unrouted_model() -> Result<()> {
++    let (_deepseek, _home, mut server) = routed_test_server().await?;
++    let started = server.start_thread(ThreadStartParams::default()).await?;
++
++    let _: codex_app_server_protocol::ThreadSettingsUpdateResponse = server
++        .request(
++            |request_id| codex_app_server_protocol::ClientRequest::ThreadSettingsUpdate {
++                request_id,
++                params: ThreadSettingsUpdateParams {
++                    thread_id: started.thread.id.clone(),
++                    model: Some("mock-model".to_string()),
++                    ..Default::default()
++                },
++            },
++        )
++        .await?;
++
++    Ok(())
++}
+diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
+index ffc748f7ab..9c17dc8da9 100644
+--- a/codex-rs/config/src/config_toml.rs
++++ b/codex-rs/config/src/config_toml.rs
+@@ -310,6 +310,14 @@ pub struct ConfigToml {
+     #[serde(default, deserialize_with = "deserialize_model_providers")]
+     pub model_providers: HashMap<String, ModelProviderInfo>,
+ 
++    /// Maps a model slug to the id of the provider that serves it.
++    ///
++    /// Clients that select one of these models without naming a provider are routed to the
++    /// mapped provider, and a session that is already pinned to a provider may only run the
++    /// models routed to it.
++    #[serde(default)]
++    pub model_provider_routes: HashMap<String, String>,
++
+     /// Maximum total bytes of project instruction content across all selected environments.
+     #[serde(default = "default_project_doc_max_bytes")]
+     pub project_doc_max_bytes: Option<usize>,
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 84f6ce9a55..78a3d8e555 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -6931,6 +6931,14 @@
+       "description": "Provider to use from the model_providers map.",
+       "type": "string"
+     },
++    "model_provider_routes": {
++      "additionalProperties": {
++        "type": "string"
++      },
++      "default": {},
++      "description": "Maps a model slug to the id of the provider that serves it.\n\nClients that select one of these models without naming a provider are routed to the mapped provider, and a session that is already pinned to a provider may only run the models routed to it.",
++      "type": "object"
++    },
+     "model_providers": {
+       "additionalProperties": {
+         "$ref": "#/definitions/ModelProviderInfo"
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index e1e00a2445..120821b9b8 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -862,6 +862,11 @@ pub struct Config {
+     /// Combined provider map (defaults plus user-defined providers).
+     pub model_providers: HashMap<String, ModelProviderInfo>,
+ 
++    /// Maps a model slug to the provider that serves it.
++    ///
++    /// A session that is pinned to a provider may only run models routed to that provider.
++    pub model_provider_routes: HashMap<String, String>,
++
+     /// Maximum total bytes of project instruction content across all selected environments.
+     pub project_doc_max_bytes: usize,
+ 
+@@ -2086,6 +2091,24 @@ fn load_model_catalog(
+         .transpose()
+ }
+ 
++/// Rejects `model_provider_routes` entries that name a provider the config does not define.
++fn validate_model_provider_routes(
++    model_provider_routes: &HashMap<String, String>,
++    model_providers: &HashMap<String, ModelProviderInfo>,
++) -> std::io::Result<()> {
++    for (model, provider_id) in model_provider_routes {
++        if !model_providers.contains_key(provider_id) {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::NotFound,
++                format!(
++                    "model_provider_routes.{model} references unknown model provider `{provider_id}`"
++                ),
++            ));
++        }
++    }
++    Ok(())
++}
++
+ fn filter_mcp_servers_by_requirements(
+     mcp_servers: &mut HashMap<String, McpServerConfig>,
+     mcp_requirements: Option<&Sourced<BTreeMap<String, McpServerRequirement>>>,
+@@ -3698,6 +3721,7 @@ impl Config {
+         let model_providers =
+             merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
+                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
++        validate_model_provider_routes(&cfg.model_provider_routes, &model_providers)?;
+ 
+         let model_provider_id = config_layer_stack.required_model_provider().map(str::to_string)
+             .or(model_provider)
+@@ -4198,6 +4222,7 @@ impl Config {
+                 .map(Duration::from_millis)
+                 .unwrap_or(DEFAULT_OPTIONAL_MCP_STARTUP_GRACE),
+             model_providers,
++            model_provider_routes: cfg.model_provider_routes.clone(),
+             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(AGENTS_MD_MAX_BYTES),
+             project_doc_fallback_filenames: cfg
+                 .project_doc_fallback_filenames
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_common.rs b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
+index 9cbe72df88..c8bcac4568 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_common.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
+@@ -289,6 +289,16 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
+             requested_model,
+             turn.multi_agent_version,
+         )?;
++        // A subagent inherits its parent's provider, so a model routed to another provider would
++        // otherwise be sent to the wrong endpoint.
++        if let Some(routed_provider) = config.model_provider_routes.get(&selected_model_name)
++            && routed_provider != &config.model_provider_id
++        {
++            return Err(FunctionCallError::RespondToModel(format!(
++                "model `{selected_model_name}` is routed to model provider `{routed_provider}` and cannot run on `{}`",
++                config.model_provider_id
++            )));
++        }
+         let selected_model_info = session
+             .services
+             .models_manager
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 1f34d69085..0971323fca 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -4564,3 +4564,57 @@ async fn build_agent_resume_config_clears_base_instructions() {
+         .expect("approval policy set");
+     assert_eq!(config, expected);
+ }
++
++#[tokio::test]
++async fn spawn_agent_rejects_a_model_routed_to_another_provider() {
++    let (mut session, turn) = make_session_and_context().await;
++    session.services.models_manager = Arc::new(StaticModelsManager::new(
++        /*auth_manager*/ None,
++        service_tier_test_catalog(),
++    ));
++    let mut config = (*turn.config).clone();
++    config.model_provider_id = "deepseek".to_string();
++    config.model_provider_routes = HashMap::from([("gpt-5.5".to_string(), "openai".to_string())]);
++
++    let error = apply_requested_spawn_agent_model_overrides(
++        &session,
++        &turn,
++        &mut config,
++        Some("gpt-5.5"),
++        /*requested_reasoning_effort*/ None,
++    )
++    .await
++    .expect_err("a subagent model routed to another provider must be rejected");
++
++    assert_eq!(
++        error,
++        FunctionCallError::RespondToModel(
++            "model `gpt-5.5` is routed to model provider `openai` and cannot run on `deepseek`"
++                .to_string()
++        )
++    );
++}
++
++#[tokio::test]
++async fn spawn_agent_accepts_a_model_routed_to_the_parent_provider() {
++    let (mut session, turn) = make_session_and_context().await;
++    session.services.models_manager = Arc::new(StaticModelsManager::new(
++        /*auth_manager*/ None,
++        service_tier_test_catalog(),
++    ));
++    let mut config = (*turn.config).clone();
++    config.model_provider_id = "deepseek".to_string();
++    config.model_provider_routes = HashMap::from([("gpt-5.5".to_string(), "deepseek".to_string())]);
++
++    apply_requested_spawn_agent_model_overrides(
++        &session,
++        &turn,
++        &mut config,
++        Some("gpt-5.5"),
++        /*requested_reasoning_effort*/ None,
++    )
++    .await
++    .expect("a subagent model routed to the parent provider is allowed");
++
++    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
++}

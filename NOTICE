@@ -1,0 +1,20 @@
+OpenAI Codex
+Copyright 2025 OpenAI
+
+This project includes code derived from [Ratatui](https://github.com/ratatui/ratatui), licensed under the MIT license.
+Copyright (c) 2016-2022 Florian Dehau
+Copyright (c) 2023-2025 The Ratatui Developers
+
+--------------------------------------------------------------------------
+Modification notice (Apache-2.0, section 4(b))
+
+This distribution contains a modified version of OpenAI Codex. The files listed in
+`patches/model-provider-routes.patch` were changed to add:
+
+  * the `model_provider_routes` configuration key (model slug -> provider id),
+  * per-session model provider routing for `thread/start` and `thread/resume`,
+  * rejection of cross-provider model selections on `thread/start`, `thread/resume`,
+    `thread/settings/update`, and subagent spawns,
+  * configuration validation for routes that name an unknown provider.
+
+This modification is unofficial: it is not affiliated with, endorsed by, or supported by OpenAI.

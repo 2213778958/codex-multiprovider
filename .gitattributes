@@ -1,0 +1,13 @@
+# Keep the patch byte-exact. Git's line-ending conversion would rewrite it on checkout and make
+# `git apply` fail for consumers on Windows.
+*.patch -text
+
+# Text files stay LF so the repository behaves the same on every platform.
+*.md   text eol=lf
+*.mjs  text eol=lf
+*.ps1  text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+
+# Batch files are consumed by cmd.exe on Windows.
+*.cmd  text eol=crlf

@@ -1,0 +1,28 @@
+# Copy these blocks into %USERPROFILE%\.codex\config.toml.
+# Replace every placeholder: paths, provider id, base URL, and model slugs.
+#
+# Credentials: store the key once with
+#   powershell -ExecutionPolicy Bypass -File set-provider-key.ps1
+# then let the engine fetch it through `auth.command`. `auth` cannot be combined with `env_key`.
+
+# 1) Top level, must appear before the first [table] header in the file.
+#    The engine replaces the account catalog with this file, so it must contain both the OpenAI
+#    models and the second provider's models. Generate it with tools/merge-model-catalogs.mjs.
+model_catalog_json = "C:\\Users\\<you>\\.codex\\merged-models.json"
+
+# 2.1) The second provider. `wire_api = "responses"` is the only accepted value in this build.
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "http://127.0.0.1:8899"   # local compatibility proxy (see step 5a in README)
+wire_api = "responses"
+requires_openai_auth = false
+
+# 2.2) Where the bearer token comes from. get-provider-key.ps1 prints the DPAPI-stored key.
+[model_providers.deepseek.auth]
+command = "powershell"
+args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\Users\\<you>\\.codex\\get-provider-key.ps1", "-Path", "C:\\Users\\<you>\\.codex\\deepseek-key.dpapi"]
+
+# 2.3) Model -> provider routing. Models not listed here keep the default provider.
+[model_provider_routes]
+"deepseek-flash" = "deepseek"
+"deepseek-v4-pro" = "deepseek"
