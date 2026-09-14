@@ -2,6 +2,8 @@
 
 [![patch applies](https://github.com/2213778958/codex-multiprovider/actions/workflows/patch-applies.yml/badge.svg)](https://github.com/2213778958/codex-multiprovider/actions/workflows/patch-applies.yml)
 
+**English** | [中文说明](README.zh-CN.md)
+
 Per-session model provider selection for Codex: pick an OpenAI model or a model from a second
 provider (for example DeepSeek) in the existing model picker, and keep each session pinned to the
 provider it started with. The desktop UI is not modified.
@@ -26,6 +28,7 @@ config/                             example config snippet + minimal catalog tem
 > Unofficial. Not affiliated with, endorsed by, or supported by OpenAI. Not currently accepted
 > upstream: `openai/codex` policy in `docs/contributing.md` is "We do not accept external code
 > contributions or pull requests", so treat this as a local patch rather than a pending PR.
+
 ## Install
 
 ```powershell

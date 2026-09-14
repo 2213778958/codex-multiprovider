@@ -72,7 +72,14 @@ if (-not $SkipReadme) {
     $publicHeader = [regex]::Replace($publicHeader, 'git checkout [0-9a-f]{7,40}', "git checkout $($base.Substring(0, 10))")
     $merged = $publicHeader + $guideBody.TrimEnd() + "`n`n" + $publicTail.TrimStart()
     [System.IO.File]::WriteAllText($targetReadme, $merged, (New-Object System.Text.UTF8Encoding($false)))
-    Write-Host '   README rebuilt (header/install/tail kept, guide body refreshed)'
+    $zhMirror = Join-Path $PublicRepo 'README.zh-CN.md'
+    if (Test-Path -LiteralPath $zhMirror) {
+        $guideTime = (Get-Item -LiteralPath $sourceGuide).LastWriteTimeUtc
+        $mirrorTime = (Get-Item -LiteralPath $zhMirror).LastWriteTimeUtc
+        if ($guideTime -gt $mirrorTime) {
+            Write-Warning 'README.zh-CN.md is older than multiprovider\README.md; the Chinese mirror may be stale.'
+        }
+    }    Write-Host '   README rebuilt (header/install/tail kept, guide body refreshed)'
 } else {
     Write-Host '3) README rebuild skipped'
 }
