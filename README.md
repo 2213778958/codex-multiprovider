@@ -34,7 +34,7 @@ config/                             example config snippet + minimal catalog tem
 ```powershell
 git clone https://github.com/openai/codex.git
 cd codex
-git checkout 1715e55076        # the commit this patch was generated against
+git checkout 1715e55076737158ba61d43158ede504de6d4ce1        # the commit this patch was generated against
 git apply path\to\patch\model-provider-routes.patch
 cd codex-rs
 cargo build -p codex-cli --bin codex

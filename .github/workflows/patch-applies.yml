@@ -13,46 +13,63 @@ on:
 jobs:
   patch-applies:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    env:
+      # Must be a full 40-character SHA: `git fetch origin <sha>` cannot resolve short forms.
+      PIN_SHA: 1715e55076737158ba61d43158ede504de6d4ce1
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read the pinned upstream commit from the README
-        id: pin
+      - name: Check the README pins the same commit as this workflow
         run: |
           set -euo pipefail
-          sha="$(grep -oE 'git checkout [0-9a-f]{7,40}' README.md | head -n 1 | awk '{print $3}')"
-          if [ -z "$sha" ]; then
-            echo "::error::no 'git checkout <sha>' pin found in README.md"
+          if ! grep -q "$PIN_SHA" README.md; then
+            echo "::error::README.md does not mention the pinned commit $PIN_SHA"
             exit 1
           fi
-          echo "pinned commit: $sha"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "README and workflow agree on $PIN_SHA"
 
-      - name: Fetch that commit from openai/codex
+      - name: Fetch exactly that commit from openai/codex
         run: |
           set -euo pipefail
-          sha="${{ steps.pin.outputs.sha }}"
           git init upstream
           git -C upstream remote add origin https://github.com/openai/codex.git
-          if ! git -C upstream fetch --depth 1 origin "$sha"; then
-            echo "fetch by SHA failed; falling back to a filtered clone"
+          if ! git -C upstream fetch --depth 1 origin "$PIN_SHA"; then
+            echo "fetch by SHA failed; falling back to a blobless clone"
             rm -rf upstream
             git clone --filter=blob:none --no-checkout https://github.com/openai/codex.git upstream
-            git -C upstream fetch --depth 1 origin "$sha"
+            git -C upstream fetch origin "$PIN_SHA"
           fi
           git -C upstream checkout --detach FETCH_HEAD
+
+      - name: Verify the checkout is real
+        run: |
+          set -euo pipefail
+          actual="$(git -C upstream rev-parse HEAD)"
+          if [ "$actual" != "$PIN_SHA" ]; then
+            echo "::error::checked out $actual, expected $PIN_SHA"
+            exit 1
+          fi
+          # Without this, `git apply --check` in an empty tree can pass vacuously.
+          test -f upstream/codex-rs/Cargo.toml
+          test -f upstream/codex-rs/core/src/config/mod.rs
+          echo "checked out $actual with the expected tree"
 
       - name: Check the patch applies cleanly
         run: |
           set -euo pipefail
           git -C upstream apply --check --verbose "$GITHUB_WORKSPACE/patch/model-provider-routes.patch"
-          echo "patch applies to ${{ steps.pin.outputs.sha }}"
 
-      - name: Apply it and summarize what it touches
+      - name: Apply it and require the expected files to change
         run: |
           set -euo pipefail
           git -C upstream apply "$GITHUB_WORKSPACE/patch/model-provider-routes.patch"
-          git -C upstream status --short
-          echo "--- diffstat ---"
+          # Count with status, not diff: the patch also adds a new file, and untracked files do not
+          # appear in `git diff`.
+          changed="$(git -C upstream status --porcelain | wc -l)"
+          echo "changed or added files: $changed"
           git -C upstream diff --stat | tail -n 1
+          if [ "$changed" -lt 10 ]; then
+            echo "::error::expected the patch to touch or add at least 10 files, saw $changed"
+            exit 1
+          fi

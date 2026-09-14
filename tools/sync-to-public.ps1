@@ -68,18 +68,38 @@ if (-not $SkipReadme) {
     $guideBody = $guideText.Substring($guideText.IndexOf('## What the engine change adds'))
     $guideBody = $guideBody -replace 'multiprovider\\tools\\', 'tools\' -replace 'multiprovider/tools/', 'tools/'
     $guideBody = $guideBody -replace 'multiprovider\\config\\', 'config\' -replace 'multiprovider/config/', 'config/'
-    # Keep the pinned commit in the install block in sync with the patch base.
-    $publicHeader = [regex]::Replace($publicHeader, 'git checkout [0-9a-f]{7,40}', "git checkout $($base.Substring(0, 10))")
+    # Keep the pinned commit in sync everywhere it appears: the CI workflow fetches it, and both
+    # READMEs tell users to check it out. It must be the full 40-character SHA, because
+    # `git fetch origin <sha>` cannot resolve a short form.
+    $publicHeader = [regex]::Replace($publicHeader, 'git checkout [0-9a-f]{7,40}', "git checkout $base")
     $merged = $publicHeader + $guideBody.TrimEnd() + "`n`n" + $publicTail.TrimStart()
     [System.IO.File]::WriteAllText($targetReadme, $merged, (New-Object System.Text.UTF8Encoding($false)))
+
     $zhMirror = Join-Path $PublicRepo 'README.zh-CN.md'
     if (Test-Path -LiteralPath $zhMirror) {
+        $zhText = [System.IO.File]::ReadAllText($zhMirror)
+        $zhUpdated = [regex]::Replace($zhText, 'git checkout [0-9a-f]{7,40}', "git checkout $base")
+        if ($zhUpdated -ne $zhText) {
+            [System.IO.File]::WriteAllText($zhMirror, $zhUpdated, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host '   README.zh-CN.md pinned commit updated'
+        }
         $guideTime = (Get-Item -LiteralPath $sourceGuide).LastWriteTimeUtc
         $mirrorTime = (Get-Item -LiteralPath $zhMirror).LastWriteTimeUtc
         if ($guideTime -gt $mirrorTime) {
             Write-Warning 'README.zh-CN.md is older than multiprovider\README.md; the Chinese mirror may be stale.'
         }
-    }    Write-Host '   README rebuilt (header/install/tail kept, guide body refreshed)'
+    }
+
+    $workflow = Join-Path $PublicRepo '.github\workflows\patch-applies.yml'
+    if (Test-Path -LiteralPath $workflow) {
+        $workflowText = [System.IO.File]::ReadAllText($workflow)
+        $workflowUpdated = [regex]::Replace($workflowText, '(?m)^(\s*PIN_SHA:\s*)[0-9a-f]{7,40}', ('${1}' + $base))
+        if ($workflowUpdated -ne $workflowText) {
+            [System.IO.File]::WriteAllText($workflow, $workflowUpdated, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host '   workflow PIN_SHA updated'
+        }
+    }
+    Write-Host '   README rebuilt (header/install/tail kept, guide body refreshed)'
 } else {
     Write-Host '3) README rebuild skipped'
 }

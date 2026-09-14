@@ -36,7 +36,7 @@ config/                             示例配置片段 + 最小目录模板
 ```powershell
 git clone https://github.com/openai/codex.git
 cd codex
-git checkout 1715e55076        # 本补丁基于的提交
+git checkout 1715e55076737158ba61d43158ede504de6d4ce1        # 本补丁基于的提交
 git apply path\to\patch\model-provider-routes.patch
 cd codex-rs
 cargo build -p codex-cli --bin codex
