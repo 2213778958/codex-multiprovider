@@ -8,6 +8,7 @@
 *.ps1  text eol=lf
 *.json text eol=lf
 *.toml text eol=lf
+*.yml  text eol=lf
 
 # Batch files are consumed by cmd.exe on Windows.
 *.cmd  text eol=crlf
