@@ -26,3 +26,8 @@ args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\Users\\<you>\\
 [model_provider_routes]
 "deepseek-flash" = "deepseek"
 "deepseek-v4-pro" = "deepseek"
+
+# 3) Optional subagent behavior. This build defaults to waking an idle parent agent when a child
+#    finishes; set it to false for the upstream "the result waits for your next message" behavior.
+[agents]
+wake_parent_on_completion = true

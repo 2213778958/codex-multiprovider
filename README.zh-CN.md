@@ -258,6 +258,12 @@ node tools\deepseek-live-probe.mjs "<codex.exe 路径>" "<CODEX_HOME>" --no-env-
 `cargo nextest run -p codex-app-server model_provider_routing`（7 个用例），以及
 `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 里的两个 subagent 用例。
 
+"完成即唤醒"这条行为有自己的测试，开关两侧都跑，并断言到达父代理的那封完成信封：
+
+```powershell
+cargo test -p codex-core --test all completed_child_wakes_idle_parent
+```
+
 ## 值得知道的子代理限额（引擎行为，与本补丁无关）
 
 嵌套子代理受引擎的并发预算限制，而撞上限额的表现更像"代理卡住了"，不像报错。以下数字来自引擎源码：
@@ -311,6 +317,26 @@ max_concurrent_threads_per_session = 8   # 更多并发模型对话；token 与�
 * **`interrupt_agent` 无法回收槽位。** 只有关闭代理（`close_agent`，它会关停线程）或让处于终态的代理
   被淘汰才能释放一个槽位。所以"我中断了它，槽位却没回来"是预期行为，而不是 bug。
 
+## 子代理完成会唤醒父代理（引擎行为，与本补丁无关）
+
+子代理汇报的方式是往父代理的邮箱里投一封完成信封。接下来会发生什么，取决于父代理当时在做什么：
+
+* **父代理正阻塞在 `wait_agent` 里** —— 邮箱活动会结束这次等待，同一个 turn 就能读到结果并继续。
+  这条路径不受配置影响。
+* **父代理已经结束了它那一轮** —— 信封只会排队，等到下一次用户输入才投递。于是"派完子代理就收尾"
+  的父代理看起来像是把子代理忘了，直到你再敲一句话。在本构建里，`[agents] wake_parent_on_completion`
+  默认为 `true`，完成信封会被标记为"可触发新一轮"，于是一个结束的子代理会自动拉起父代理的新一轮，
+  父代理自己继续干活。
+
+```toml
+[agents]
+wake_parent_on_completion = true   # true（本构建默认）：子代理结束即唤醒空闲父代理
+                                   # false：上游行为 —— 结果等你的下一句话
+```
+
+只有**已经结束**的子代理才会唤醒空闲父代理：在某一轮还在跑的时候到达的邮件会被并进那一轮，所以多个
+子代理同时结束只会产生一次后续回合，而不是每个子代理各来一轮。把该键设为 `false` 即完全恢复上游行为。
+
 ## 已知边界
 
 * **客户端未公开的钩子。** `CODEX_CLI_PATH` 与 `CODEX_APP_SERVER_FORCE_CLI` 是闭源商店客户端读取的
@@ -320,6 +346,12 @@ max_concurrent_threads_per_session = 8   # 更多并发模型对话；token 与�
 * **线协议。** 本构建对供应商只接受 `wire_api = "responses"`。请确认你的供应商实现了它，包括工具调用
   与长上下文。
 * **模型 slug 是配置，不是常量**：写供应商实际提供的名字。
+* **`codex exec` 需要 `model_provider` 与路由一致。** CLI 调用 `thread/start` 时总会带上配置里的默认
+  供应商，而引擎会拒绝与 `model_provider_routes` 相矛盾的供应商。如果你按示例配置把默认供应商留作
+  `openai`、只把第二家的模型加入路由，`codex exec` 会报
+  ``model `<slug>` is routed to model provider `<id>` and cannot run on `openai` ``。桌面客户端不发送
+  供应商，因此不受影响。解决办法：在 `config.toml` 里设 `model_provider = "<id>"`，或给 `exec` 传
+  `-c model_provider="<id>"`。
 * 不带引擎覆盖启动客户端时，选择器仍会列出第二家的模型，但没有任何东西会把它们路由过去。
 
 ## 回退

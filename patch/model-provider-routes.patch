@@ -397,7 +397,7 @@ index 0000000000..a2338646e1
 +    Ok(())
 +}
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index ffc748f7ab..9c17dc8da9 100644
+index ffc748f7ab..78f18ef122 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -310,6 +310,14 @@ pub struct ConfigToml {
@@ -415,11 +415,33 @@ index ffc748f7ab..9c17dc8da9 100644
      /// Maximum total bytes of project instruction content across all selected environments.
      #[serde(default = "default_project_doc_max_bytes")]
      pub project_doc_max_bytes: Option<usize>,
+@@ -705,6 +713,10 @@ pub struct AgentsToml {
+     /// Whether to record a model-visible message when an agent turn is interrupted.
+     /// Defaults to true.
+     pub interrupt_message: Option<bool>,
++    /// Whether a completed agent turn wakes its parent agent with a new turn.
++    /// Defaults to true: without it, a child that finishes after its parent went idle
++    /// is only reported on the next user turn.
++    pub wake_parent_on_completion: Option<bool>,
+ 
+     /// User-defined role declarations keyed by role name.
+     ///
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 84f6ce9a55..78a3d8e555 100644
+index 84f6ce9a55..5e5c531dc7 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -6931,6 +6931,14 @@
+@@ -66,6 +66,10 @@
+           "description": "Maximum nesting depth for V1 agent threads. Ignored by V2.",
+           "format": "int32",
+           "type": "integer"
++        },
++        "wake_parent_on_completion": {
++          "description": "Whether a completed agent turn wakes its parent agent with a new turn. Defaults to true: without it, a child that finishes after its parent went idle is only reported on the next user turn.",
++          "type": "boolean"
+         }
+       },
+       "type": "object"
+@@ -6931,6 +6935,14 @@
        "description": "Provider to use from the model_providers map.",
        "type": "string"
      },
@@ -434,8 +456,76 @@ index 84f6ce9a55..78a3d8e555 100644
      "model_providers": {
        "additionalProperties": {
          "$ref": "#/definitions/ModelProviderInfo"
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index 31fcbfc906..f7e9cab240 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -8384,6 +8384,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
+             default_subagent_reasoning_effort: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
++            wake_parent_on_completion: None,
+             roles: BTreeMap::from([(
+                 "researcher".to_string(),
+                 AgentRoleToml {
+@@ -9334,6 +9335,7 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+             default_subagent_model: Some("gpt-5.6-terra".to_string()),
+             default_subagent_reasoning_effort: Some(ReasoningEffort::High),
+             interrupt_message: Some(false),
++            wake_parent_on_completion: Some(false),
+             ..Default::default()
+         }),
+         ..Default::default()
+@@ -9353,6 +9355,7 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+             config.agent_default_subagent_model.as_deref(),
+             config.agent_default_subagent_reasoning_effort,
+             config.agent_interrupt_message_enabled,
++            config.agent_wake_parent_on_completion,
+         ),
+         (
+             false,
+@@ -9360,6 +9363,7 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
+             Some("gpt-5.6-terra"),
+             Some(ReasoningEffort::High),
+             false,
++            false,
+         )
+     );
+ 
+@@ -9399,6 +9403,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
+             default_subagent_reasoning_effort: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
++            wake_parent_on_completion: None,
+             roles: BTreeMap::from([(
+                 "researcher".to_string(),
+                 AgentRoleToml {
+@@ -9445,6 +9450,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
+             default_subagent_reasoning_effort: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
++            wake_parent_on_completion: None,
+             roles: BTreeMap::from([(
+                 "researcher".to_string(),
+                 AgentRoleToml {
+@@ -9485,6 +9491,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
+             default_subagent_reasoning_effort: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
++            wake_parent_on_completion: None,
+             roles: BTreeMap::from([(
+                 "researcher".to_string(),
+                 AgentRoleToml {
+@@ -9525,6 +9532,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
+             default_subagent_reasoning_effort: None,
+             job_max_runtime_seconds: None,
+             interrupt_message: None,
++            wake_parent_on_completion: None,
+             roles: BTreeMap::from([(
+                 "researcher".to_string(),
+                 AgentRoleToml {
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index e1e00a2445..120821b9b8 100644
+index e1e00a2445..31b4563d07 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -862,6 +862,11 @@ pub struct Config {
@@ -450,7 +540,17 @@ index e1e00a2445..120821b9b8 100644
      /// Maximum total bytes of project instruction content across all selected environments.
      pub project_doc_max_bytes: usize,
  
-@@ -2086,6 +2091,24 @@ fn load_model_catalog(
+@@ -886,6 +891,9 @@ pub struct Config {
+     /// Whether to record a model-visible message when an agent turn is interrupted.
+     pub agent_interrupt_message_enabled: bool,
+ 
++    /// Whether an agent completion wakes an idle parent agent with a new turn.
++    pub agent_wake_parent_on_completion: bool,
++
+     /// Maximum nesting depth for V1 agent threads. Ignored by V2.
+     pub agent_max_depth: i32,
+ 
+@@ -2086,6 +2094,24 @@ fn load_model_catalog(
          .transpose()
  }
  
@@ -475,7 +575,7 @@ index e1e00a2445..120821b9b8 100644
  fn filter_mcp_servers_by_requirements(
      mcp_servers: &mut HashMap<String, McpServerConfig>,
      mcp_requirements: Option<&Sourced<BTreeMap<String, McpServerRequirement>>>,
-@@ -3698,6 +3721,7 @@ impl Config {
+@@ -3698,6 +3724,7 @@ impl Config {
          let model_providers =
              merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
                  .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
@@ -483,7 +583,19 @@ index e1e00a2445..120821b9b8 100644
  
          let model_provider_id = config_layer_stack.required_model_provider().map(str::to_string)
              .or(model_provider)
-@@ -4198,6 +4222,7 @@ impl Config {
+@@ -3790,6 +3817,11 @@ impl Config {
+             .as_ref()
+             .and_then(|agents| agents.interrupt_message)
+             .unwrap_or(true);
++        let agent_wake_parent_on_completion = cfg
++            .agents
++            .as_ref()
++            .and_then(|agents| agents.wake_parent_on_completion)
++            .unwrap_or(true);
+         let background_terminal_max_timeout = cfg
+             .background_terminal_max_timeout
+             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
+@@ -4198,6 +4230,7 @@ impl Config {
                  .map(Duration::from_millis)
                  .unwrap_or(DEFAULT_OPTIONAL_MCP_STARTUP_GRACE),
              model_providers,
@@ -491,6 +603,27 @@ index e1e00a2445..120821b9b8 100644
              project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(AGENTS_MD_MAX_BYTES),
              project_doc_fallback_filenames: cfg
                  .project_doc_fallback_filenames
+@@ -4234,6 +4267,7 @@ impl Config {
+                 .transpose()?,
+             memories: memories_config,
+             agent_interrupt_message_enabled,
++            agent_wake_parent_on_completion,
+             codex_home,
+             sqlite: codex_state::SqliteConfig::from_sqlite_home(sqlite_home),
+             log_dir,
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 3bb68a8839..a7575f19fa 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2419,7 +2419,7 @@ impl Session {
+             parent_agent_path,
+             Vec::new(),
+             message,
+-            /*trigger_turn*/ false,
++            turn_context.config.agent_wake_parent_on_completion,
+         );
+         let context =
+             AgentCommunicationContext::new(AgentCommunicationKind::Result, self.thread_id);
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_common.rs b/codex-rs/core/src/tools/handlers/multi_agents_common.rs
 index 9cbe72df88..c8bcac4568 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_common.rs
@@ -513,9 +646,18 @@ index 9cbe72df88..c8bcac4568 100644
              .services
              .models_manager
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 1f34d69085..0971323fca 100644
+index 1f34d69085..6c9fecb38f 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -1909,7 +1909,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
+                                 if communication.author == worker_path
+                                     && communication.recipient == AgentPath::root()
+                                     && communication.other_recipients.is_empty()
+-                                    && !communication.trigger_turn =>
++                                    && communication.trigger_turn =>
+                             {
+                                 Some(communication.content)
+                             }
 @@ -4564,3 +4564,57 @@ async fn build_agent_resume_config_clears_base_instructions() {
          .expect("approval policy set");
      assert_eq!(config, expected);
@@ -574,3 +716,285 @@ index 1f34d69085..0971323fca 100644
 +
 +    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
 +}
+diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
+index ac5e47f16c..9233be5f35 100644
+--- a/codex-rs/core/tests/suite/subagent_notifications.rs
++++ b/codex-rs/core/tests/suite/subagent_notifications.rs
+@@ -385,6 +385,27 @@ async fn wait_for_requests(
+     }
+ }
+ 
++async fn wait_for_request_with_text(
++    mock: &core_test_support::responses::ResponseMock,
++    text: &str,
++    timeout: Duration,
++) -> Result<Option<ResponsesRequest>> {
++    let deadline = Instant::now() + timeout;
++    loop {
++        let request = mock
++            .requests()
++            .into_iter()
++            .find(|request| request.body_contains_text(text));
++        if let Some(request) = request {
++            return Ok(Some(request));
++        }
++        if Instant::now() >= deadline {
++            return Ok(None);
++        }
++        sleep(Duration::from_millis(10)).await;
++    }
++}
++
+ async fn wait_for_request_with_model(
+     mock: &core_test_support::responses::ResponseMock,
+     model: &str,
+@@ -2735,11 +2756,146 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
+     Ok(())
+ }
+ 
++const WAKE_CHILD_PROMPT: &str = "child: finish the wake probe";
++const WAKE_CHILD_ANSWER: &str = "wake probe child finished";
++const WAKE_SPAWN_CALL_ID: &str = "wake-probe-spawn";
++const WAKE_COMPLETION_TEXT: &str = concat!(
++    "Message Type: FINAL_ANSWER\n",
++    "Task name: /root\n",
++    "Sender: /root/wake_probe\n",
++    "Payload:\n",
++    "wake probe child finished"
++);
++
++/// A child that finishes after the parent ended its turn must wake the idle parent with a new
++/// automatic turn carrying the completion envelope. With the wake disabled the parent stays idle
++/// and the completion is only delivered on the next user turn.
++#[test_case(true; "wakes the idle parent")]
++#[test_case(false; "keeps the idle parent asleep")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn completed_child_wakes_idle_parent(wake_parent_on_completion: bool) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++
++    let server = start_mock_server().await;
++    let spawn_args = serde_json::to_string(&json!({
++        "message": WAKE_CHILD_PROMPT,
++        "task_name": "wake_probe",
++    }))?;
++    mount_sse_once_match(
++        &server,
++        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
++        sse(vec![
++            ev_response_created("resp-wake-parent-1"),
++            ev_function_call_with_namespace(
++                WAKE_SPAWN_CALL_ID,
++                MULTI_AGENT_V2_NAMESPACE,
++                "spawn_agent",
++                &spawn_args,
++            ),
++            ev_completed("resp-wake-parent-1"),
++        ]),
++    )
++    .await;
++    // The parent turn keeps running only until the spawn result comes back, so this mock ends the
++    // parent's first turn and leaves no other responder while the child is still working.
++    let parent_followup_log = mount_sse_once_match(
++        &server,
++        |req: &wiremock::Request| {
++            request_has_input_type(req, "function_call_output")
++                && body_contains(req, WAKE_SPAWN_CALL_ID)
++        },
++        sse(vec![
++            ev_response_created("resp-wake-parent-1b"),
++            ev_assistant_message("msg-wake-parent-1b", "parent waiting"),
++            ev_completed("resp-wake-parent-1b"),
++        ]),
++    )
++    .await;
++    let child_request_log = mount_sse_once_match(
++        &server,
++        |req: &wiremock::Request| body_contains(req, WAKE_CHILD_PROMPT),
++        sse(vec![
++            ev_response_created("resp-wake-child-1"),
++            ev_assistant_message("msg-wake-child-1", WAKE_CHILD_ANSWER),
++            ev_completed("resp-wake-child-1"),
++        ]),
++    )
++    .await;
++    // Only a wake-up turn can ask the model again after the parent's turn already ended.
++    let wake_request_log = mount_sse_once_match(
++        &server,
++        |req: &wiremock::Request| body_contains(req, WAKE_COMPLETION_TEXT),
++        sse(vec![
++            ev_response_created("resp-wake-parent-2"),
++            ev_assistant_message("msg-wake-parent-2", "parent resumed"),
++            ev_completed("resp-wake-parent-2"),
++        ]),
++    )
++    .await;
++
++    let test = test_codex()
++        .with_config(move |config| {
++            config
++                .features
++                .enable(Feature::Collab)
++                .expect("test config should allow feature update");
++            config
++                .features
++                .enable(Feature::MultiAgentV2)
++                .expect("test config should allow feature update");
++            config.model_provider.request_max_retries = Some(0);
++            config.model_provider.stream_max_retries = Some(0);
++            config.model_provider.supports_websockets = false;
++            config.agent_wake_parent_on_completion = wake_parent_on_completion;
++        })
++        .build_with_auto_env(&server)
++        .await?;
++
++    test.submit_turn(TURN_1_PROMPT).await?;
++    let child_request = wait_for_requests(&child_request_log)
++        .await?
++        .pop()
++        .expect("spawned child should send its own request");
++    assert!(child_request.body_contains_text(WAKE_CHILD_PROMPT));
++    let _ = wait_for_requests(&parent_followup_log).await?;
++
++    let wake_request = wait_for_request_with_text(
++        &wake_request_log,
++        WAKE_COMPLETION_TEXT,
++        Duration::from_secs(if wake_parent_on_completion { 10 } else { 6 }),
++    )
++    .await?;
++
++    if wake_parent_on_completion {
++        let wake_request = wake_request.expect("completed child should wake the idle parent");
++        assert_eq!(
++            strip_response_item_ids_from_json(strip_metadata_from_json(Value::Array(
++                wake_request.inputs_of_type("agent_message"),
++            ))),
++            Value::Array(vec![json!({
++                "type": "agent_message",
++                "author": "/root/wake_probe",
++                "recipient": "/root",
++                "content": [{
++                    "type": "input_text",
++                    "text": WAKE_COMPLETION_TEXT,
++                }],
++            })])
++        );
++    } else {
++        assert!(
++            wake_request.is_none(),
++            "the disabled wake must not resume the idle parent after the child completes"
++        );
++    }
++
++    Ok(())
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn() -> Result<()> {
+     const SPAWN_WORKER_PROMPT: &str = "spawn the completion-routing worker";
+     const SPAWN_REQUESTER_PROMPT: &str = "spawn the completion-routing requester";
+-    const READ_RESULT_PROMPT: &str = "read the completion-routing worker result";
+     const WORKER_INITIAL_TASK: &str = "finish the worker initial task";
+     const REQUESTER_TASK: &str = "ask the sibling worker to do more";
+     const WORKER_FOLLOWUP_TASK: &str = "finish the peer-requested worker task";
+@@ -2950,7 +3106,15 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn() -> R
+                         .expect("worker turn metadata"),
+                 )
+                 .expect("worker turn metadata JSON");
+-                assert_eq!(metadata["turn_trigger"], "composer");
++                // A peer-requested follow-up wakes the worker through the mailbox as an automatic
++                // continuation, so it carries no explicit turn trigger.
++                assert!(
++                    metadata
++                        .get("turn_trigger")
++                        .is_none_or(serde_json::Value::is_null),
++                    "unexpected worker follow-up turn trigger: {:?}",
++                    metadata.get("turn_trigger")
++                );
+                 body["client_metadata"]["turn_id"]
+                     .as_str()
+                     .expect("worker follow-up turn ID")
+@@ -2994,22 +3158,12 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn() -> R
+         )
+     );
+ 
+-    // Fresh turn input is sampled before queued mail is drained. Let that first
+-    // request complete successfully so the next request can include the result.
+-    mount_sse_once_match(
+-        &server,
+-        |request: &wiremock::Request| {
+-            body_contains(request, READ_RESULT_PROMPT)
+-                && !body_contains(request, "peer follow-up finished")
+-        },
+-        sse(vec![ev_completed("resp-routing-root-before-mail")]),
+-    )
+-    .await;
++    // A waiting user turn would be rejected while the completion is queued, so wait for the
++    // wake-up turn that the completion itself starts.
+     let root_result_request = mount_sse_once_match(
+         &server,
+         |request: &wiremock::Request| {
+-            body_contains(request, READ_RESULT_PROMPT)
+-                && body_contains(request, "Sender: /root/worker")
++            body_contains(request, "Sender: /root/worker")
+                 && body_contains(request, "peer follow-up finished")
+         },
+         sse(vec![
+@@ -3019,25 +3173,27 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn() -> R
+         ]),
+     )
+     .await;
+-    test.submit_turn(READ_RESULT_PROMPT).await?;
+-    let root_request = root_result_request
+-        .requests()
+-        .into_iter()
+-        .find(|request| {
+-            request.body_json()["client_metadata"]["thread_id"] == json!(root_thread_id)
+-                && request.body_contains_text(READ_RESULT_PROMPT)
+-                && request.body_contains_text("peer follow-up finished")
+-        })
+-        .expect("root result request");
+-    assert!(
+-        root_request
+-            .inputs_of_type("agent_message")
+-            .iter()
+-            .any(|item| {
+-                item["author"] == "/root/worker"
+-                    && item["recipient"] == "/root"
+-                    && item.to_string().contains("peer follow-up finished")
+-            })
++    let deadline = Instant::now() + Duration::from_secs(10);
++    let root_request = loop {
++        let request = root_result_request.requests().into_iter().find(|request| {
++            request.body_contains_text("peer follow-up finished")
++                && request
++                    .inputs_of_type("agent_message")
++                    .iter()
++                    .any(|item| item["author"] == "/root/worker")
++        });
++        if let Some(request) = request {
++            break request;
++        }
++        assert!(
++            Instant::now() < deadline,
++            "the root should be woken by the peer follow-up completion"
++        );
++        sleep(Duration::from_millis(10)).await;
++    };
++    assert_eq!(
++        root_request.body_json()["client_metadata"]["thread_id"],
++        json!(root_thread_id)
+     );
+ 
+     Ok(())
+diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
+index 47ab3e0926..93d0556e4b 100644
+--- a/codex-rs/thread-manager-sample/src/main.rs
++++ b/codex-rs/thread-manager-sample/src/main.rs
+@@ -263,6 +263,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+         agent_default_subagent_model: None,
+         agent_default_subagent_reasoning_effort: None,
+         agent_interrupt_message_enabled: false,
++        agent_wake_parent_on_completion: true,
+         agent_max_depth: 1,
+         agent_roles: BTreeMap::new(),
+         memories: MemoriesConfig::default(),

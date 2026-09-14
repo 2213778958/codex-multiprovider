@@ -281,6 +281,13 @@ Tests for the engine change live in the usual suites:
 `cargo nextest run -p codex-app-server model_provider_routing` (7 cases) and the two subagent
 cases in `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`.
 
+The wake-on-completion behavior has its own test; it runs both sides of the switch and asserts the
+completion envelope that reaches the parent:
+
+```powershell
+cargo test -p codex-core --test all completed_child_wakes_idle_parent
+```
+
 ## Subagent limits worth knowing (engine behavior, not this patch)
 
 Nested subagents are bounded by an engine concurrency budget, and hitting it looks like "the agent
@@ -341,6 +348,29 @@ Two properties of the limit are worth knowing so it is not misread as a leak:
   thread down) or eviction of an agent in a final state frees one, so "I interrupted it and the slot
   never came back" is expected behavior rather than a bug.
 
+## Subagent completion wakes the parent (engine behavior, not this patch)
+
+A subagent reports back by dropping a completion envelope into its parent's mailbox. What happens
+next depends on what the parent is doing:
+
+* **Parent is blocked in `wait_agent`** — the mailbox activity ends the wait, the same turn reads the
+  result and continues. This path is unaffected by configuration.
+* **Parent already ended its turn** — the envelope is queued and only delivered on the next user
+  turn, so a parent that spawns agents and then finishes looks like it "forgot" about them until you
+  type something. With `[agents] wake_parent_on_completion = true` (the default in this build) the
+  envelope is marked as turn-triggering instead, so a finished child starts a new automatic parent
+  turn and the parent keeps working on its own.
+
+```toml
+[agents]
+wake_parent_on_completion = true   # true (default here): a finished child resumes an idle parent
+                                   # false: upstream behavior — the result waits for your next message
+```
+
+An idle parent is only woken by *finished* children: mail that arrives while a turn is still running
+is drained into that turn, so several children finishing together produce a single follow-up turn
+rather than one turn each. Setting the key to `false` restores the upstream behavior exactly.
+
 ## Caveats
 
 * **Undocumented client hooks.** `CODEX_CLI_PATH` and `CODEX_APP_SERVER_FORCE_CLI` are read by the
@@ -351,6 +381,13 @@ Two properties of the limit are worth knowing so it is not misread as a leak:
 * **Wire protocol.** This build only accepts `wire_api = "responses"` for providers. Confirm your
   provider implements it, including tool calls and long contexts.
 * **Model slugs** are configuration, not constants: use what the provider actually serves.
+* **`codex exec` needs `model_provider` to agree with the routes.** The CLI always sends the
+  configured default provider with `thread/start`, and the engine rejects a provider that
+  contradicts `model_provider_routes`. If you keep the default provider as `openai` while routing
+  the second provider's models (as the example config does), `codex exec` fails with
+  ``model `<slug>` is routed to model provider `<id>` and cannot run on `openai` ``. The desktop
+  client does not send a provider, so it is unaffected. Either set `model_provider = "<id>"` in
+  `config.toml` or pass `-c model_provider="<id>"` to `exec`.
 * Starting the client without the engine override leaves the picker showing the second provider's
   models while nothing routes them.
 
