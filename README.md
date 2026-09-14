@@ -86,15 +86,23 @@ cargo build -p codex-cli --bin codex
 
 ### 2. Store the provider key once
 
+Install the key scripts into `%USERPROFILE%\.codex` first, then store the key:
+
 ```powershell
+powershell -ExecutionPolicy Bypass -File tools\install-tools.ps1
 powershell -ExecutionPolicy Bypass -File tools\set-provider-key.ps1
 ```
 
-The key is encrypted with Windows DPAPI for the current user and stored at
+`install-tools.ps1` copies `set-provider-key.ps1` / `get-provider-key.ps1` into `~/.codex` and
+reports when the installed copies are out of date (re-run it after editing them here). They are
+**installed** rather than referenced from this checkout on purpose: the provider config pins the
+command path, and the engine snapshots the provider configuration **per thread**, so a path inside a
+checkout breaks every running session the moment that checkout moves, is deleted, or changes branch.
+
+The key itself is encrypted with Windows DPAPI for the current user and stored at
 `%USERPROFILE%\.codex\deepseek-key.dpapi`. The engine reads it back through the provider's
 `auth.command` (see the config snippet), so it is never kept in the registry, in a plaintext file,
-or in a permanent environment variable. Copy `get-provider-key.ps1` next to the config that
-references it, or adjust the path in the snippet.
+or in a permanent environment variable.
 
 ### 3. Build the merged catalog
 

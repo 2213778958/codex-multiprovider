@@ -19,6 +19,7 @@ tools/                              集成工具，可直接使用：
                                       proxy-watchdog.mjs                会话级看门狗
                                       set-provider-key.ps1              一次性存 key（DPAPI）
                                       get-provider-key.ps1              引擎侧取 token
+                                      install-tools.ps1                 把上面两个脚本装到 ~/.codex
                                       merge-model-catalogs.mjs          生成合并目录
                                       make-shortcut.ps1, stop-proxy.ps1 桌面快捷方式 / 清理
                                       routing-e2e.mjs, deepseek-live-probe.mjs,
@@ -82,13 +83,22 @@ cargo build -p codex-cli --bin codex
 
 ### 2. 一次性保存供应商 key
 
+先把两个取 key 脚本**安装**到 `%USERPROFILE%\.codex`，再存 key：
+
 ```powershell
+powershell -ExecutionPolicy Bypass -File tools\install-tools.ps1
 powershell -ExecutionPolicy Bypass -File tools\set-provider-key.ps1
 ```
 
+`install-tools.ps1` 会把 `set-provider-key.ps1` / `get-provider-key.ps1` 复制进 `~/.codex`，并在已安装
+副本过期时提示（在这里改过脚本后重跑一次即可）。之所以用"安装"而不是直接引用本仓库路径：供应商配置里
+**钉死了命令路径**，而引擎会把供应商配置**按会话快照**——一旦 checkout 被移动、删除或切换分支，所有
+正在运行的会话都会立刻失效（表现是每次请求都报 `The argument '...get-provider-key.ps1' to the -File
+parameter does not exist`）。
+
 key 用 Windows DPAPI 以当前用户身份加密，存放在 `%USERPROFILE%\.codex\deepseek-key.dpapi`。
 引擎通过供应商配置里的 `auth.command` 把它取回来（见配置片段），因此它**不会**出现在注册表、
-明文文件或永久环境变量里。请把 `get-provider-key.ps1` 放在配置里引用的位置，或修改片段中的路径。
+明文文件或永久环境变量里。
 
 ### 3. 生成合并目录
 
