@@ -59,21 +59,56 @@ $patchFiles = (Select-String -LiteralPath $targetPatch -Pattern '^diff --git' | 
 if ($patchFiles -eq 0) { throw "regenerated patch is empty: $targetPatch" }
 Write-Host ("   base {0} -> head {1}; {2} files, {3} B" -f $base.Substring(0, 10), $head.Substring(0, 10), $patchFiles, $patchInfo.Length)
 
+Write-Host '2b) Pinning the base commit in the engine installer ...'
+# install-engine.ps1 refuses any checkout that is not at $PinnedSha, so a stale pin turns into a
+# confusing failure for a new user. Keep the fork and the public copy on the same commit as the patch.
+$pinPattern = '(?m)^(\s*[$]PinnedSha\s*=\s*'')([0-9a-f]{7,40})('')'
+foreach ($engineScript in @((Join-Path $sourceTools 'install-engine.ps1'), (Join-Path $targetTools 'install-engine.ps1'))) {
+    if (-not (Test-Path -LiteralPath $engineScript)) { continue }
+    $scriptText = [System.IO.File]::ReadAllText($engineScript)
+    $scriptUpdated = [regex]::Replace($scriptText, $pinPattern, ('${1}' + $base + '${3}'))
+    if ($scriptUpdated -ne $scriptText) {
+        [System.IO.File]::WriteAllText($engineScript, $scriptUpdated, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "   PinnedSha updated: $engineScript"
+    }
+}
+
 if (-not $SkipReadme) {
     Write-Host '3) Rebuilding the public README from the guide ...'
     $publicText = [System.IO.File]::ReadAllText($targetReadme)
     $guideText = [System.IO.File]::ReadAllText($sourceGuide)
-    $publicHeader = $publicText.Substring(0, $publicText.IndexOf('## What the engine change adds'))
-    $publicTail = $publicText.Substring($publicText.IndexOf('## Not included'))
-    $guideBody = $guideText.Substring($guideText.IndexOf('## What the engine change adds'))
+    # The guide and the public README share one body, delimited by the sync markers: everything
+    # before sync:begin and from sync:end on is specific to each file, the middle is rebuilt here.
+    $beginMarker = '<!-- sync:begin -->'
+    $endMarker = '<!-- sync:end -->'
+    $publicBegin = $publicText.IndexOf($beginMarker)
+    $publicEnd = $publicText.IndexOf($endMarker)
+    $guideBegin = $guideText.IndexOf($beginMarker)
+    $guideEnd = $guideText.IndexOf($endMarker)
+    if ($publicBegin -lt 0 -or $publicEnd -lt $publicBegin) {
+        throw "the public README is missing the $beginMarker / $endMarker markers."
+    }
+    if ($guideBegin -lt 0 -or $guideEnd -lt $guideBegin) {
+        throw "the guide is missing the $beginMarker / $endMarker markers."
+    }
+    $publicHeader = $publicText.Substring(0, $publicBegin + $beginMarker.Length)
+    $publicTail = $publicText.Substring($publicEnd)
+    $guideBody = $guideText.Substring($guideBegin + $beginMarker.Length, $guideEnd - ($guideBegin + $beginMarker.Length))
     $guideBody = $guideBody -replace 'multiprovider\\tools\\', 'tools\' -replace 'multiprovider/tools/', 'tools/'
     $guideBody = $guideBody -replace 'multiprovider\\config\\', 'config\' -replace 'multiprovider/config/', 'config/'
     # Keep the pinned commit in sync everywhere it appears: the CI workflow fetches it, and both
     # READMEs tell users to check it out. It must be the full 40-character SHA, because
     # `git fetch origin <sha>` cannot resolve a short form.
-    $publicHeader = [regex]::Replace($publicHeader, 'git checkout [0-9a-f]{7,40}', "git checkout $base")
-    $merged = $publicHeader + $guideBody.TrimEnd() + "`n`n" + $publicTail.TrimStart()
+    $merged = [regex]::Replace($publicHeader + $guideBody + $publicTail, 'git checkout [0-9a-f]{7,40}', "git checkout $base")
+    # This checkout normalizes text files to CRLF on checkout; the public README is LF everywhere.
+    $merged = $merged.Replace("`r`n", "`n")
     [System.IO.File]::WriteAllText($targetReadme, $merged, (New-Object System.Text.UTF8Encoding($false)))
+
+    $guidePinned = [regex]::Replace($guideText, 'git checkout [0-9a-f]{7,40}', "git checkout $base")
+    if ($guidePinned -ne $guideText) {
+        [System.IO.File]::WriteAllText($sourceGuide, $guidePinned, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host '   guide pinned commit updated'
+    }
 
     $zhMirror = Join-Path $PublicRepo 'README.zh-CN.md'
     if (Test-Path -LiteralPath $zhMirror) {

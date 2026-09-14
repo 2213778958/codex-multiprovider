@@ -4,16 +4,368 @@
 
 [English](README.md) | **中文**
 
-让 Codex **按会话选择模型供应商**：在**原有的模型选择器**里同时选 OpenAI 模型或第二家供应商
-（例如 DeepSeek）的模型，并让每个会话固定在它启动时的供应商上。**不改动桌面 UI。**
+> 非官方；与 OpenAI 无关联、未获其认可或支持。上游不接受外部贡献（`openai/codex` 的
+> `docs/contributing.md`："We do not accept external code contributions or pull requests"），
+> 因此这里以本地补丁形式分发，而非一个待合并的 PR。本文件是 [README.md](README.md) 的中文镜像。
 
-> 英文版 [README.md](README.md) 为准；本文件是逐节对应的全文镜像，可能略滞后于英文版的更新。
+让 Codex 桌面端的选择器也能列出第二家供应商（默认 DeepSeek）的模型，并让每个会话固定在它启动时的
+供应商上。桌面客户端不做任何修改。
 
-仓库内容：
+| 选择器里选 | 该会话的供应商 |
+| --- | --- |
+| OpenAI 模型，如 `gpt-5.5` | OpenAI |
+| 第二家模型，如 `deepseek-flash` | 第二家供应商 |
+
+* 供应商在 `thread/start` 时定下；`thread/resume` 保持不变，`thread/settings/update` 无法切换。
+* 子代理继承父代理的供应商；子代理选到别家的模型会被拒绝。
+* 路由指向未配置的供应商会导致配置加载失败。
+
+## 三块拼图
+
+| 部分 | 路径 | 作用 |
+| --- | --- | --- |
+| 引擎补丁 | `patch/model-provider-routes.patch`（codex-rs，10 个文件） | 新增 `model_provider_routes` |
+| 合并目录 | `tools/merge-model-catalogs.mjs` | `model_catalog_json` 会整体替换账户目录，因此一个文件必须同时含两家的模型 |
+| 本机中转 | `tools/deepseek-proxy.mjs`，只绑定 `127.0.0.1` | 把 `agent_message` 项改写成 user 消息；没有它，每个 spawn 出来的子代理都会拿到空任务 |
+
+`tools/` 其余部分是启动器、看门狗、key 存储与验证探针。
+
+## 环境要求
+
+| 需要 | 说明 |
+| --- | --- |
+| Windows | key 用 DPAPI 存储；辅助脚本是 PowerShell 与 `.cmd` |
+| `PATH` 上有 Node.js | 中转与工具链 |
+| `git` 与 Rust/Cargo | 编译引擎；Rust 从 <https://rustup.rs> 安装 |
+| Codex 桌面客户端 | 不做修改；不用本项目时它照常可用 |
+| 约 10 GB 空间、10~30 分钟 | 首次 `cargo build`；之后为增量编译 |
+
+`install-engine.ps1` 在缺少 `git` 或 `cargo` 时直接停下并给出安装提示。Windows 上 rustup 会提供
+MSVC C++ 生成工具，接受后重开终端。
+
+## 安装
+
+### 1. 编译引擎
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\install-engine.ps1
+```
+
+也可双击 `tools\install-engine.cmd`。脚本按钉住的提交克隆上游、应用
+`patch\model-provider-routes.patch`、编译 `codex.exe`；checkout 不干净或提交不符时拒绝执行。
+
+手动等价操作：
+
+```powershell
+git clone https://github.com/openai/codex.git
+cd codex
+git checkout 1715e55076737158ba61d43158ede504de6d4ce1   # 补丁针对的提交
+git apply ..\patch\model-provider-routes.patch
+cd codex-rs
+cargo build -p codex-cli --bin codex
+```
+
+引擎查找：启动器会在「本仓库所在目录」和「其上一级目录」下依次找
+`codex-rs\target\release\codex.exe` 与 `debug\codex.exe`。其他摆放方式（包括安装脚本创建的
+`codex-engine` 目录）需传 `-CodexExe <codex.exe 路径>`。
+
+crates.io 慢时，只在自己的终端设置（本项目不写全局配置）：
+
+```powershell
+$env:CARGO_REGISTRIES_CRATES_IO_INDEX = "sparse+https://rsproxy.cn/index/"
+$env:RUSTUP_DIST_SERVER = "https://rsproxy.cn"
+$env:RUSTUP_UPDATE_ROOT = "https://rsproxy.cn/rustup"
+git -c http.proxy=http://127.0.0.1:7890 clone https://github.com/openai/codex.git
+```
+
+首次编译产出约 10 GB，耗时 10~30 分钟。
+
+### 2. 存储供应商 key
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\install-tools.ps1
+powershell -ExecutionPolicy Bypass -File tools\set-provider-key.ps1
+```
+
+`install-tools.ps1` 把 `set-provider-key.ps1` 与 `get-provider-key.ps1` 复制进 `~/.codex`，并在副本
+过期时提示。之所以是"安装"而非引用：供应商配置钉死了命令路径，而引擎按会话快照供应商配置，所以
+checkout 内的路径在该 checkout 被移动、删除或切换分支后会让运行中的会话全部失效（报错：`The
+argument '...get-provider-key.ps1' to the -File parameter does not exist`）。
+
+key 以当前用户身份经 DPAPI 加密存放在 `%USERPROFILE%\.codex\deepseek-key.dpapi`，引擎通过
+`auth.command` 读取。它不会出现在注册表、明文文件或永久环境变量中。
+
+### 3. 生成合并目录
+
+```powershell
+node tools\merge-model-catalogs.mjs "$env:USERPROFILE\.codex" `
+  "$env:USERPROFILE\.codex\merged-models.json" `
+  "C:\path\to\your-provider-models.json"
+```
+
+把供应商目录合并进 `<CODEX_HOME>\models_cache.json` 里的账户目录缓存。第二家的目录可从
+`config/example-models.json` 起步；若缓存不存在，先启动一次 Codex 生成。
+
+条目要求：
+
+* 指令文本：`base_instructions` 或 `model_messages.instructions_template`，内容自己写。
+* 必填字段：`display_name`、`supported_reasoning_levels`、`shell_type`、`visibility`、
+  `supported_in_api`、`priority`、`support_verbosity`、`default_verbosity`、`truncation_policy`、
+  `experimental_supported_tools`。
+* `visibility = "list"` 才会出现在选择器里。
+* UTF-8 且不带 BOM。PowerShell 5.1 的 `Set-Content -Encoding utf8` 会写 BOM，引擎随后报
+  `expected value at line 1 column 1`；Node 脚本不会写 BOM。
+
+### 4. 配置
+
+把 `config/example.config-snippet.toml` 合并进 `%USERPROFILE%\.codex\config.toml`：
+
+```toml
+model_catalog_json = "C:\\Users\\<you>\\.codex\\merged-models.json"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "http://127.0.0.1:8899"   # 本机中转，见第 5 步
+wire_api = "responses"
+requires_openai_auth = false
+
+[model_providers.deepseek.auth]
+command = "powershell"
+args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\Users\\<you>\\.codex\\get-provider-key.ps1", "-Path", "C:\\Users\\<you>\\.codex\\deepseek-key.dpapi"]
+
+[model_provider_routes]
+"deepseek-flash" = "deepseek"
+```
+
+`auth` 不能与 `env_key`、`experimental_bearer_token`、`requires_openai_auth` 并用。
+
+### 5. 启动客户端
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\start-desktop-deepseek.ps1
+```
+
+也可双击 `tools\start-desktop-deepseek.cmd`。启动器会：无 key 文件时先存 key；中转不健康时拉起中转与
+看门狗；`base_url` 未指向中转时告警；仅为本次会话设置引擎覆盖；优先使用 `target\release\codex.exe`
+而非 `target\debug\codex.exe`。
+
+## 验证
+
+选择器：第二家的模型与 OpenAI 的并列显示。用它新建会话后，请求会发往那家供应商，可在
+`%USERPROFILE%\.codex\proxy-log.jsonl` 看到。
+
+```powershell
+# 路由、供应商固定、显式冲突被拒绝
+node tools\routing-e2e.mjs "<codex.exe 路径>" "<含该配置的 CODEX_HOME>"
+
+# 第二家是否暴露 Responses 路径？（默认用无效 key；--no-env-key 则走 auth.command）
+node tools\deepseek-live-probe.mjs "<codex.exe 路径>" "<CODEX_HOME>" --no-env-key
+```
+
+引擎测试：`cargo nextest run -p codex-app-server model_provider_routing`（7 个用例）、
+`codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 的两个 subagent 用例、以及
+`cargo test -p codex-core --test all completed_child_wakes_idle_parent`。
+
+## 常用命令
+
+| 目的 | 命令 |
+| --- | --- |
+| 启动客户端 | `tools\start-desktop-deepseek.cmd` |
+| 只检查引擎、key、中转、供应商地址 | `tools\start-desktop-deepseek.ps1 -ValidateOnly` |
+| 客户端开着时救活中转 | `tools\start-desktop-deepseek.ps1 -ProxyOnly` |
+| 跳过中转 | `tools\start-desktop-deepseek.ps1 -SkipProxy` |
+| 跳过看门狗 | `tools\start-desktop-deepseek.ps1 -NoWatchdog` |
+| 换中转端口 | `tools\start-desktop-deepseek.ps1 -ProxyPort 8900` |
+| 指定引擎构建 | `tools\start-desktop-deepseek.ps1 -CodexExe <codex.exe 路径>` |
+| 停止中转与看门狗 | `tools\stop-proxy.ps1` |
+| 创建桌面快捷方式 | `tools\make-shortcut.ps1` |
+
+`make-shortcut.ps1` 用 `-Detach` 与已安装包里的图标（`app\resources\chatgpt-app-dark.ico`）创建
+`ChatGPT (DeepSeek engine).lnk`。没有任何 OpenAI 素材被复制进本仓库或快捷方式旁边，描述里标明非官方。
+客户端更新后图标变空白时重跑一次即可（商店包路径含版本号）。图标仍是 OpenAI 的商标：从自己已安装的
+副本引用属描述性使用；再分发该文件或把自己的产物命名为 "ChatGPT"/"Codex" 不在 Apache-2.0 §6 授权内。
+
+## 更新
+
+### 桌面客户端更新（微软商店）
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 快捷方式图标变空白 | 商店路径含包版本号 | 重跑 `tools\make-shortcut.ps1` |
+| 选择器有模型但不路由，或客户端不用你的引擎 | `CODEX_CLI_PATH` / `CODEX_APP_SERVER_FORCE_CLI` 变了（未公开钩子） | 用 `-ValidateOnly` 检查；没有钩子时官方客户端仍可用，只是没有第二家供应商 |
+| 新的 OpenAI 模型不见了 | 合并目录是快照 | 重跑 `merge-model-catalogs.mjs` |
+| 与你的引擎通信报协议错误 | 客户端跑在引擎所基于的提交前面 | 用更新的提交重新编译引擎（见下） |
+
+### 引擎跟进上游新提交
+
+`install-engine.ps1` 只接受钉住的提交。编译更新的引擎：
+
+```powershell
+cd .\codex-engine                        # install-engine.ps1 创建的 checkout
+git fetch origin
+git checkout <新提交或 origin/main>
+git apply -3 ..\patch\model-provider-routes.patch
+cd codex-rs
+cargo build -p codex-cli --bin codex --release
+```
+
+`-3` 做三方合并，而不是在第一个不匹配处失败；剩余冲突手动解决即可（补丁只碰 `codex-rs`，10 个文件）。
+若 Git 报缺 blob，先跑 `git fetch --unshallow`。切换前按[验证](#验证)一节的命令确认；启动器会自动采用
+`target\release\codex.exe`，也可先用 `-CodexExe <路径>` 试跑。
+
+维护者应重新钉版本而不是手动打补丁：把改动 rebase 到更新的上游之上，运行 `tools\sync-to-public.ps1`
+（重新生成补丁，并改写两份 README 与 CI workflow 里的钉住提交），再更新 `tools\install-engine.ps1`
+里的 `$PinnedSha`。README、`.github/workflows/patch-applies.yml` 与该脚本三处必须一致，CI 会在 README
+与 workflow 不一致时失败。
+
+### 本仓库更新
+
+```powershell
+git pull
+powershell -ExecutionPolicy Bypass -File tools\install-tools.ps1   # 刷新 ~/.codex 里的取 key 脚本
+powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1   # 仅在图标变空白时需要
+```
+
+启动器、中转与探针直接从 checkout 运行。若 `patch\model-provider-routes.patch` 有变化，重新编译引擎。
+
+## 排障
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 第二家供应商：连接错误 | 中转未运行，供应商不可达 | 等看门狗恢复，或 `tools\start-desktop-deepseek.ps1 -ProxyOnly` |
+| `node was not found on PATH` | 缺 Node.js | 安装 Node.js，或用 `-SkipProxy` |
+| 端口被别的程序占用 | 配置的端口被占 | 无客户端运行时启动器会换到下一个空闲端口并改写 `base_url`（配置有备份）；否则先关客户端 |
+| 分支里出现 `agent thread limit reached` | 子代理并发预算 | 调大 `[agents] max_concurrent_threads_per_session`，或不要嵌套 |
+| 子代理报告无事可做 | 任务作为 `agent_message` 被供应商忽略 | 确认中转在跑且 `base_url` 指向它 |
+| `expected value at line 1 column 1` | 目录文件带 UTF-8 BOM | 重存为不带 BOM |
+| `...get-provider-key.ps1' to the -File parameter does not exist` | 运行中的会话指向已移动的取 key 脚本 | 重跑 `tools\install-tools.ps1`，重启会话 |
+| 选择器里缺 OpenAI 模型 | 合并目录里没有它们 | 用有内容的 `models_cache.json` 重跑 `merge-model-catalogs.mjs` |
+| `Patched engine not found` | 构建不在启动器搜索的两个 `codex-rs\target` 位置 | `tools\start-desktop-deepseek.ps1 -CodexExe <路径>` |
+
+日志：`%USERPROFILE%\.codex\proxy-log.jsonl`（仅传 `--body-dir` 时记录请求体）、
+`%USERPROFILE%\.codex\proxy-watchdog.log`、`%USERPROFILE%\.codex\proxy-watchdog-<port>.json`。
+
+## 参考：补丁行为
+
+| 位置 | 行为 |
+| --- | --- |
+| 配置 | `model_provider_routes`：`"<模型 slug>" = "<供应商 id>"` |
+| `thread/start` | 有路由的模型落在其供应商上；显式给出相冲突的供应商被拒绝 |
+| `thread/resume` | 保持会话创建时的供应商 |
+| `thread/settings/update` | 切到别家供应商的模型被拒绝 |
+| 子代理 spawn | 别家供应商的模型被拒绝（子代理继承父代理供应商） |
+| 配置加载 | 路由指向未知供应商会导致加载失败 |
+
+## 参考：本机中转
+
+引擎把每一条代理间消息（包括给新子代理的第一个任务）**只**作为 `agent_message` 项投递，正文在第二个
+内容段：
+
+```json
+{"type":"agent_message","author":"/root","recipient":"/root/probe","content":[
+  {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/probe\nSender: /root\nPayload:\n"},
+  {"type":"encrypted_content","encrypted_content":"<真正的任务正文>"}
+]}
+```
+
+忽略未知 item 类型的供应商会丢掉该任务：子代理只带 developer 与环境上下文启动，报告无事可做后立即完成。
+已通过对照实验确认（同一段文字作为普通 `message` 能被理解，作为 `agent_message` 不能），也做了端到端确认
+（经改写后，用 `fork_turns: "none"` 启动的子代理仍收到并执行了任务）。
+
+`deepseek-proxy.mjs` 从 `encrypted_content` 段取出正文，把这些项改写成普通 user 消息；tools、
+reasoning 项、function call、请求头与流式响应原样透传。
+
+* 解析或改写失败时转发原始字节；最坏情况等同于没有中转，只是子代理任务又会丢失。
+* 日志尽力而为，绝不因写日志让请求失败；只有传 `--body-dir` 才落盘请求体。
+* `GET /__proxy/health` 返回标记：启动器据此识别中转，`stop-proxy.ps1` 只杀回应标记的进程。
+* 长流式回合不设超时；未捕获异常只记日志，不会中断进程。
+* `agent_message` 正文不可读时该项保持原样，并计入 `unreadableAgentMessages`；绝不把密文当作任务注入。
+
+端口：`base_url` 必须是字面量（引擎不展开配置值里的环境变量）。启动器：
+
+1. 优先使用配置里已有的端口；
+2. 若无人应答，在**同一端口**重启中转——运行中的线程保留启动时的 `base_url`；
+3. 仅当该端口被非中转进程占用且无客户端运行时，换到下一个空闲端口并改写
+   `[model_providers.<id>].base_url`，同时保留带时间戳的 `config.toml` 备份。
+
+`-ProxyPort` 改首选端口；`-ProxyOnly` 只修复中转、不启动客户端。
+
+看门狗：会话存活期间每 10 秒检查一次健康标记，中转消失时在同一端口重启它。不开机自启、不建计划任务、
+不写注册表、不设永久环境变量；客户端退出约 20 秒后自行退出，并收掉它自己启动的中转（启动器启动的不动）。
+状态写在 `%USERPROFILE%\.codex\proxy-watchdog-<port>.json`；连续 5 次重启失败后放弃。`-NoWatchdog` 关闭它。
+`stop-proxy.ps1` 总是先停看门狗再停中转。
+
+## 参考：引擎行为（与本补丁无关）
+
+### 子代理限额
+
+* 默认预算：每会话 4 个并发代理。根会话占一个，即最多 3 个子代理。主键
+  `features.multi_agent_v2.max_concurrent_threads_per_session`；`[agents]
+  max_concurrent_threads_per_session`（别名 `max_threads`）同样有效。
+* 运行中或等待中的代理永不被淘汰。只有 `Completed`、`Errored`、`Interrupted` 且无进行中 turn、无待处理
+  邮箱消息的代理可被卸载（`core/src/agent/control/residency.rs`）。槽位全被占满时 spawn 失败并返回
+  `AgentLimitReached`，模型看到的是 `agent thread limit reached`。
+* `wait_agent` 默认 30 秒超时（`timeout_ms`，10 秒~1 小时）。等待嵌套子代理的父代理可能报"什么都没回来"
+  而子代理仍在运行；传更大的 `timeout_ms`（最大 3600000）可消除这种误报，但不增加槽位。
+* V2 无嵌套深度上限；`agents.max_depth` 只对 V1 后端生效。
+
+| 形态 | 代理数 | 默认 4 个够吗 |
+| --- | --- | --- |
+| 1 根 + 3 个子 | 4 | 够 |
+| 1 根 + 2 分支 + 每支 1 叶子 | 5 | 不够，一个叶子饿死 |
+| 1 根 + 2 分支 + 每支 2 叶子 | 7 | 不够，两个叶子饿死 |
+
+```toml
+[agents]
+max_concurrent_threads_per_session = 8   # 更多并发模型对话，token 消耗更多
+```
+
+复现："开两个 subagent，各再开两个"（2×2 树，7 个代理），真实引擎 + 真实供应商。
+
+| 预算 | 结果 |
+| --- | --- |
+| 4（默认） | `agent thread limit reached` 出现在某分支自己的 reasoning 里，而非工具错误，外观上像一个分支卡住、另一个完成；该分支的叶子始终不启动 |
+| 8 | 未撞限额；两个分支与四个叶子全部完成 |
+
+是饥饿而非泄漏：等待中的父代理不可淘汰，槽位占满时 spawn 失败；代理完成后被淘汰（从 `list_agents`
+消失，线程仍在磁盘上），容量恢复。`interrupt_agent` 不释放槽位，只有 `close_agent` 或终态代理被淘汰才会。
+
+### 子代理完成后唤醒父代理
+
+* 父代理阻塞在 `wait_agent`：邮箱活动结束等待，同一 turn 继续。该路径不受配置影响。
+* 父代理那一轮已结束：信封排队到你的下一次输入，除非设置了 `wake_parent_on_completion`。本构建默认为
+  `true`，即结束的子代理会拉起父代理的新一轮。
+
+```toml
+[agents]
+wake_parent_on_completion = true   # true（本构建默认）：子代理结束即唤醒空闲父代理
+                                   # false：上游行为，等你的下一句话
+```
+
+只有已结束的子代理才唤醒空闲父代理；turn 进行中到达的邮件会并入该 turn，所以多个子代理同时结束只产生
+一次后续回合。
+
+## 已知边界
+
+* `CODEX_CLI_PATH` 与 `CODEX_APP_SERVER_FORCE_CLI` 由闭源商店客户端读取。它们不受支持、不属于本仓库，
+  且可能随客户端更新改变。本集成从不修改客户端文件，不绕过代码签名或包完整性校验，并保留官方客户端可用
+  作为退路。用替代引擎是否符合其使用条款需自行判断。
+* 本构建对供应商只接受 `wire_api = "responses"`；供应商必须实现它，包括工具调用与长上下文。
+* 模型 slug 是配置而非常量：写供应商实际提供的名字。
+* 不带引擎覆盖启动客户端时，选择器仍会列出第二家的模型，但没有任何东西路由它们。
+
+## 回退
+
+从 `config.toml` 删除 `model_catalog_json`、`[model_providers.<id>]`（连同 `auth`）与
+`[model_provider_routes]`，然后正常启动客户端。只删 `base_url` 覆盖则恢复官方供应商地址，子代理任务
+重新收不到。
+
+## 仓库内容
 
 ```
 patch/model-provider-routes.patch   仅引擎改动（codex-rs，10 个文件）
 tools/                              集成工具，可直接使用：
+                                      install-engine.ps1/.cmd           克隆 + 打补丁 + 编译引擎
                                       start-desktop-deepseek.ps1/.cmd   启动器
                                       deepseek-proxy.mjs                兼容层（本机中转）
                                       proxy-watchdog.mjs                会话级看门狗
@@ -24,385 +376,26 @@ tools/                              集成工具，可直接使用：
                                       make-shortcut.ps1, stop-proxy.ps1 桌面快捷方式 / 清理
                                       routing-e2e.mjs, deepseek-live-probe.mjs,
                                       subagent-slot-probe.mjs           验证探针
+                                      sync-to-public.ps1                重建补丁与本 README（维护者用）
 config/                             示例配置片段 + 最小目录模板
 ```
 
-> 非官方。与 OpenAI 无关联、未获其认可或支持，也不在其支持范围内。上游暂不接受此类改动：
-> `openai/codex` 的 `docs/contributing.md` 明确写着 "We do not accept external code contributions
-> or pull requests"，所以这里以**本地补丁**形式分发，而不是一个待合并的 PR。
-
-## 安装
-
-```powershell
-git clone https://github.com/openai/codex.git
-cd codex
-git checkout 1715e55076737158ba61d43158ede504de6d4ce1        # 本补丁基于的提交
-git apply path\to\patch\model-provider-routes.patch
-cd codex-rs
-cargo build -p codex-cli --bin codex
-```
-
-然后把本仓库放在你编译出的代码旁边（或任意位置），继续按下面的章节操作：一次性保存供应商 key
-（Windows DPAPI）、生成合并目录、合并配置片段、用 `tools\start-desktop-deepseek.cmd` 启动客户端。
-当本仓库与代码目录相邻时启动器会自动找到引擎，否则传 `-CodexExe <codex.exe 路径>`。
-
-开发本补丁时用过的验证：
-
-* `cargo nextest run -p codex-app-server model_provider_routing` —— 7 个用例全部通过。
-* `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 里两个 subagent 用例 —— 通过。
-* `tools/routing-e2e.mjs` 对真实引擎：有路由的模型落到它的供应商，未路由的保持默认，显式冲突的供应商被拒绝。
-* `tools/deepseek-live-probe.mjs --no-env-key` 对真实引擎 + DPAPI 存的 key：供应商自己返回的 `401`
-  里能看到所存 key 的掩码尾部，证明请求带着经 `auth.command` 取得的 token 到达了供应商。
-* UI 层面：用打过补丁的引擎，**未改动的商店客户端**选择器里会同时列出第二家的模型，且由该选择器
-  创建的会话会在 rollout 元数据里记录第二家供应商。
-* `tools/subagent-slot-probe.mjs` 复现了"子代理限额"一节描述的嵌套行为。
-
-## 引擎改动带来了什么
-
-| 位置 | 行为 |
-| --- | --- |
-| 配置 | 新增 `model_provider_routes`：`"<模型 slug>" = "<供应商 id>"` |
-| `thread/start` | 有路由的模型会让会话落在它的供应商上；显式给出相冲突的供应商会被拒绝 |
-| `thread/resume` | 会话保持它创建时的供应商 |
-| `thread/settings/update` | 中途切到别家供应商的模型会被拒绝 |
-| 子代理 spawn | 子代理选到别家供应商的模型会被拒绝（子会话继承父供应商） |
-| 配置加载 | 路由指向不存在的供应商会导致配置加载失败 |
-
-桌面 UI 无需任何改动：它只是渲染 `model/list` 返回的内容，并把选中的模型发给 `thread/start`。
-由于 `model_catalog_json` 会**整体替换**账户目录，目录文件必须同时包含两家供应商的模型；
-`tools/merge-model-catalogs.mjs` 就是用来生成它的。
-
-## 配置步骤
-
-### 1. 编译引擎
-
-一条命令，从零到打好补丁的 `codex.exe`——它会按钉住的提交克隆上游引擎、打补丁、然后编译：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\install-engine.ps1
-```
-
-也可以直接双击 `tools\install-engine.cmd`。编完用这个核对：
-
-```powershell
-node tools\routing-e2e.mjs "<codex.exe 路径>" "<含该配置的 CODEX_HOME>"
-```
-
-想手动做也行：
-
-```powershell
-git clone https://github.com/openai/codex.git
-cd codex
-git checkout 1715e55076737158ba61d43158ede504de6d4ce1   # 补丁就是针对这个提交生成的
-git apply ..\patch\model-provider-routes.patch
-cd codex-rs
-cargo build -p codex-cli --bin codex
-```
-
-脚本需要 `git` 和 `cargo` 在 `PATH` 上，缺哪个会直接停下并给出安装提示。它**不会**去动一个不干净、
-或不在钉住提交上的 checkout。
-
-#### 关于 Rust，以及下载慢怎么办
-
-光有 `git` 不够——引擎是 Rust 写的，所以还需要工具链：
-
-1. 从 <https://rustup.rs> 安装 Rust。Windows 上安装器会检测到缺失的 MSVC C++ 生成工具并主动提出帮你装，
-   接受它，装完重开一个终端。
-2. 就这些。`codex-rs\rust-toolchain.toml` 钉死了编译器版本，你第一次在这个 checkout 里编译时 rustup
-   会自动把对应版本装上。
-
-接下来 `cargo build` 要从 crates.io 拉几百个 crate。如果你那里慢或连不上，**在你自己的终端里**把工具
-指向镜像——本项目从不改你的全局配置：
-
-```powershell
-# cargo：只对当前终端会话使用 crates.io 镜像
-$env:CARGO_REGISTRIES_CRATES_IO_INDEX = "sparse+https://rsproxy.cn/index/"
-# rustup：从镜像获取工具链（两个都要设，且要在运行 rustup 之前设）
-$env:RUSTUP_DIST_SERVER = "https://rsproxy.cn"
-$env:RUSTUP_UPDATE_ROOT = "https://rsproxy.cn/rustup"
-# git：GitHub 被墙时走代理
-git -c http.proxy=http://127.0.0.1:7890 clone https://github.com/openai/codex.git
-```
-
-首次编译大约产出 10 GB 构建产物、耗时 10~30 分钟（取决于机器）。之后的编译是增量的，几秒就好。
-
-### 2. 一次性保存供应商 key
-
-先把两个取 key 脚本**安装**到 `%USERPROFILE%\.codex`，再存 key：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\install-tools.ps1
-powershell -ExecutionPolicy Bypass -File tools\set-provider-key.ps1
-```
-
-`install-tools.ps1` 会把 `set-provider-key.ps1` / `get-provider-key.ps1` 复制进 `~/.codex`，并在已安装
-副本过期时提示（在这里改过脚本后重跑一次即可）。之所以用"安装"而不是直接引用本仓库路径：供应商配置里
-**钉死了命令路径**，而引擎会把供应商配置**按会话快照**——一旦 checkout 被移动、删除或切换分支，所有
-正在运行的会话都会立刻失效（表现是每次请求都报 `The argument '...get-provider-key.ps1' to the -File
-parameter does not exist`）。
-
-key 用 Windows DPAPI 以当前用户身份加密，存放在 `%USERPROFILE%\.codex\deepseek-key.dpapi`。
-引擎通过供应商配置里的 `auth.command` 把它取回来（见配置片段），因此它**不会**出现在注册表、
-明文文件或永久环境变量里。
-
-### 3. 生成合并目录
-
-```powershell
-node tools\merge-model-catalogs.mjs "$env:USERPROFILE\.codex" `
-  "$env:USERPROFILE\.codex\merged-models.json" `
-  "C:\path\to\your-provider-models.json"
-```
-
-如果需要自己编写第二家的目录，可从 `config/example-models.json` 起步。以下是踩坑得来的注意事项：
-
-* 每个条目都必须提供指令文本——`base_instructions` 或 `model_messages.instructions_template` 二者之一。
-  **请自己写**，不要把别家的提示词正文抄进去。
-* 必填字段包括：`display_name`、`supported_reasoning_levels`、`shell_type`、`visibility`、
-  `supported_in_api`、`priority`、`support_verbosity`、`default_verbosity`、`truncation_policy`、
-  `experimental_supported_tools`。
-* `visibility = "list"` 才会让模型出现在选择器里。
-* 存为 **UTF-8 且不带 BOM**。Windows PowerShell 5.1 的 `Set-Content -Encoding utf8` 会写入 BOM，
-  引擎随后报 `expected value at line 1 column 1`。Node 脚本（合并脚本）不受影响。
-
-### 4. 加入配置
-
-把 `config/example.config-snippet.toml` 合并进 `%USERPROFILE%\.codex\config.toml`
-（顶层 `model_catalog_json`、供应商表、它的 `auth` 子表、以及路由表）。
-`auth` 不能与 `env_key`、`experimental_bearer_token` 或 `requires_openai_auth` 同时使用。
-
-把供应商的 `base_url` 指到本机兼容层（见 5b）：
-
-```toml
-[model_providers.deepseek]
-base_url = "http://127.0.0.1:8899"
-```
-
-### 5a. 为什么需要本机中转
-
-OpenAI 的 Responses API 接受 `agent_message` 类型的输入项。引擎把**所有**代理间消息——包括给新
-子代理的第一个任务——**只**通过这种项投递，正文放在它的第二个内容段里：
-
-```json
-{"type":"agent_message","author":"/root","recipient":"/root/probe","content":[
-  {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/probe\nSender: /root\nPayload:\n"},
-  {"type":"encrypted_content","encrypted_content":"<真正的任务正文>"}
-]}
-```
-
-因此，忽略未知 item 类型的供应商会把任务丢掉：子代理只带着 developer 与环境上下文启动，报告
-"没有可做的事"，随即完成。这一点用对照实验确认过（同一段文字放进普通 `message` 能被理解，放进
-`agent_message` 则不能），也做了端到端确认：经下面的改写后，用 `fork_turns: "none"`（不继承任何历史）
-启动的子代理依然收到了任务并执行。
-
-`tools/deepseek-proxy.mjs` 把请求转发给真正的供应商，并把 `agent_message` 项改写成普通 user 消息
-（正文取自 `encrypted_content` 段）。其余一切——tools、reasoning 项、function call、请求头、流式响应
-——原样透传。
-
-健壮性约束：
-
-* 解析或改写失败时**原样转发原始字节**，所以有它在绝不会比没有它更糟（唯一退步是子代理任务又收不到）。
-* 日志是尽力而为，绝不因写日志而让请求失败。请求体**默认不落盘**，除非显式传 `--body-dir`
-  （因为其中含对话内容）。
-* `GET /__proxy/health` 返回专属标记，启动器据此区分"我的中转"与"占用同一端口的别的程序"；
-  `stop-proxy.ps1` 也只杀回应这个标记的进程。
-* 长流式回合不会被超时切断；未捕获异常只记录日志，不会在对话中途把进程打死。
-
-需要知道的失败形态：中转没在跑 → 供应商不可达（**可见的连接错误**，不会静默出错），启动器会先把它
-拉起，拉不起来就**拒绝启动客户端**；中转在会话中途死掉 → 引擎暴露上游错误并重试。
-
-#### 什么情况会让中转挂掉
-
-| 情况 | 你会看到 | 恢复方式 |
-| --- | --- | --- |
-| 重启/注销 | 中转没了（客户端也没了） | 再启动一次，启动器会拉起它 |
-| 被任务管理器/杀软/OOM 杀掉 | DeepSeek 回合连接错误数秒（可见、会重试） | 会话看门狗会在一个检查周期内在**同一端口**把它拉回；没有看门狗时再跑启动器（`-ProxyOnly` 在客户端开着时也能用） |
-| 端口被别的程序占用 | 启动器先在配置用的端口上重启；若该端口被"非本中转"的程序占着且当前没有客户端在跑，它会换到下一个空闲端口并改写供应商 `base_url`（配置自动备份） | 没有客户端在跑时无需处理；有客户端时先关掉 |
-| Node.js 缺失或不在 `PATH` | 启动器抛 `node was not found on PATH` 并且不启动客户端 | 安装 Node.js，或用 `-SkipProxy` |
-| 上游网络/TLS 故障 | 中转回 `502` 并带明确信息；引擎重试 | 临时性问题；与没有中转时表现一致 |
-| 遇到改写不认识的载荷形状 | 请求**原样**转发 | 无需处理，对话照常 |
-| `agent_message` 的正文不可读（例如真被加密） | 该项保持原样，并记为 `unreadableAgentMessages`；中继**绝不**把密文或 JSON 当成任务塞进去 | 子代理任务可能仍缺失，但不会污染上下文 |
-| 磁盘满或日志文件被锁 | 日志静默跳过 | 清空间即可；请求不受影响 |
-| 误开第二个中转 | 第二个以 `EADDRINUSE` 退出，第一个继续服务 | 无需处理 |
-| 首次运行的防火墙弹窗 | 不会有：只绑定 `127.0.0.1`，不需要任何入站规则 | 若出现可直接关闭 |
-
-贯穿以上的一条不变量：**改写失败就退回原始请求**，所以对普通对话而言，最坏情况等于"从没有过这个中转"。
-
-#### 端口
-
-供应商的 `base_url` 必须是字面量：引擎不做配置值的环境变量展开，因此在不改引擎的前提下无法按会话
-注入中转地址。于是由启动器替你管理地址：
-
-1. 配置里已经在用的端口优先，已有的环境不受打扰。
-2. 若那里没人应答，启动器**先在同一端口重启**中转——这是崩溃后最正确的做法，因为**已经在跑的会话
-   会保留它们启动时的 `base_url`**，换端口等于让它们打向空气。
-3. 只有该端口确实被别的程序占着（健康标记不匹配）、**且当前没有客户端在跑**时，才会挑下一个空闲端口，
-   改写 `[model_providers.<id>].base_url`，并为 `config.toml` 留带时间戳的备份。
-
-用 `-ProxyPort` 改首选端口；用 `-ProxyOnly` 在不启动客户端的情况下让中转恢复健康（换过端口后同样适用）。
-
-#### 会话看门狗
-
-`tools/proxy-watchdog.mjs` 在客户端会话存活期间盯着中转：每 10 秒检查一次健康标记，一旦中转消失就
-**在同一端口**把它重启（运行中的会话保留启动时的 `base_url`，换端口会让它们失联）。
-
-它刻意做成**会话级**：
-
-* 不开机自启、不建计划任务、不写注册表、不设永久环境变量。
-* 客户端退出约 20 秒后它自行退出，并收掉**它自己启动的**那个中转，所以会话结束不留任何东西
-  （由启动器启动的中转它不动）。
-* 它会写 `%USERPROFILE%\.codex\proxy-watchdog-<port>.json`，启动器据此判断是否已有一个在跑，
-  `stop-proxy.ps1` 据此找到它。启动器绝不会启动第二个。
-* 连续 5 次重启失败（例如端口被别的程序占用）就放弃并记录原因，而不是空转。
-
-通过启动器启动它（默认），或看 `%USERPROFILE%\.codex\proxy-watchdog.log` 了解它做过什么。
-`-NoWatchdog` 可跳过。`stop-proxy.ps1` **总是先停看门狗再停中转**——否则看门狗会立刻把中转又拉起来。
-
-### 5b. 启动客户端
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\start-desktop-deepseek.ps1
-```
-
-或双击 `tools\start-desktop-deepseek.cmd`。若还没有 key 文件，它会先让你保存一次 key；若中转不健康
-就启动它（`-SkipProxy` 可跳过）；若供应商 `base_url` 没指向中转会给出告警；然后**只在本会话**设置引擎
-覆盖并启动客户端。
-
-常用开关：`-ValidateOnly`（只报告引擎、key、中转与供应商地址，不启动任何东西）、`-SkipProxy`、
-`-Detach`、`-ProxyPort`。
-
-停止中转用 `tools\stop-proxy.ps1`。回退方式是去掉 `base_url` 覆盖（恢复官方供应商地址；子代理任务
-会重新收不到）。
-
-#### 桌面快捷方式
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1
-```
-
-会在桌面创建 `ChatGPT (DeepSeek engine).lnk`，使用 `-Detach`（启动器立即返回；客户端保留它继承到的
-环境），图标取自**已安装**的包（`app\resources\chatgpt-app-dark.ico`）。**没有**任何 OpenAI 素材被复制
-进本仓库或快捷方式旁边，快捷方式描述里也写明是非官方。客户端更新后若图标变空白，重跑一次脚本即可：
-商店包路径里含包版本号。
-
-关于品牌：该图标仍是 OpenAI 的商标素材。在你自己的机器上引用本机已安装副本里的图标、去标注"启动这个
-应用"的快捷方式，属于描述性使用；但**再分发该图标文件**、或把你自己的产物命名为 "ChatGPT"/"Codex"，
-都不在 Apache-2.0 的授权范围内（第 6 条不授予商标权），并且可能被理解为官方背书。发布**脚本**，而不是
-**素材**，并让名字明确是非官方的。
-
-## 验证一次构建
-
-```powershell
-# 路由、供应商固定、显式冲突被拒绝
-node tools\routing-e2e.mjs "<codex.exe 路径>" "<含该配置的 CODEX_HOME>"
-
-# 第二家供应商是否暴露 Responses 路径？（默认用无效 key；加 --no-env-key 则走供应商的 auth.command）
-node tools\deepseek-live-probe.mjs "<codex.exe 路径>" "<CODEX_HOME>" --no-env-key
-```
-
-引擎改动的测试在常规测试套件里：
-`cargo nextest run -p codex-app-server model_provider_routing`（7 个用例），以及
-`codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 里的两个 subagent 用例。
-
-"完成即唤醒"这条行为有自己的测试，开关两侧都跑，并断言到达父代理的那封完成信封：
-
-```powershell
-cargo test -p codex-core --test all completed_child_wakes_idle_parent
-```
-
-## 值得知道的子代理限额（引擎行为，与本补丁无关）
-
-嵌套子代理受引擎的并发预算限制，而撞上限额的表现更像"代理卡住了"，不像报错。以下数字来自引擎源码：
-
-* **默认预算：每会话 4 个并发代理。** 根会话也占一个，所以不调大的话你最多只能有 3 个子代理。
-  主键是 `features.multi_agent_v2.max_concurrent_threads_per_session`；
-  `[agents] max_concurrent_threads_per_session`（别名 `max_threads`）同样生效。
-* **运行中或等待中的代理永远不会被淘汰。** 只有处于 `Completed`、`Errored`、`Interrupted`，且没有
-  进行中的 turn、没有待处理邮箱消息的代理才能被卸载以腾出槽位
-  （`core/src/agent/control/residency.rs`）。所以当每个槽位都被"仍在干活或仍在等待"的代理占住时，
-  新的 spawn 会失败并返回 `AgentLimitReached` —— 模型看到的是 `agent thread limit reached`。
-* **`wait_agent` 默认 30 秒超时**（`timeout_ms`，最小 10 秒、最大 1 小时）。因此等待嵌套子代理的父代理
-  可能超时并报告"什么都没回来"，而子代理其实还在跑。传更大的 `timeout_ms`（最大 3600000）能消除这类
-  误判，但**不会**变出槽位。
-* **V2 没有嵌套深度上限。** `agents.max_depth` 只对旧的 V1 后端生效，V2 会忽略它，所以树的深度纯粹受
-  上面的预算约束。
-
-一棵"一个根 + 若干子代理"的树所需槽位：
-
-| 形态 | 需要的代理数 | 默认 4 个够吗 |
-| --- | --- | --- |
-| 1 根 + 3 个子 | 4 | 够 |
-| 1 根 + 2 分支 + 每支 1 个叶子 | 5 | 不够（一个叶子饿死） |
-| 1 根 + 2 分支 + 每支 2 个叶子 | 7 | 不够（两个叶子饿死） |
-
-如果某个工作流需要更宽的扇出，自行调大预算即可——这是受支持的配置项，不是补丁要求：
-
-```toml
-[agents]
-max_concurrent_threads_per_session = 8   # 更多并发模型对话；token 与线程数都会上升
-```
-
-保持默认对"只委派一层"完全够用；这种用法下告诉模型不要嵌套，并且（可选）让它给 `wait_agent` 传更长的
-`timeout_ms`。
-
-#### 复现记录："某个分支卡住"到底是什么
-
-"开两个 subagent，让每个再各开两个，然后汇报"这种请求（2×2 树，7 个代理）在真实引擎 + 真实供应商上
-跑过两次：
-
-| 预算 | 结果 |
-| --- | --- |
-| 默认 4 | `agent thread limit reached` 出现在**某个分支自己的 reasoning 里**，而不是作为工具错误返回，所以从外面看就像"一个分支卡住了、另一个完成了"；其中一个分支的叶子始终没启动 |
-| 8 | 没有撞限额；两个分支与全部四个叶子都完成并返回了结果 |
-
-限额有两个性质值得记住，以免被误读成泄漏：
-
-* 它是**饥饿**，不是泄漏。等待中的父代理不可淘汰，所以当每个槽位都被干活或等待中的代理占住时，下一个
-  spawn 就会失败；代理一旦完成就会被淘汰（从 `list_agents` 消失，线程仍在磁盘上），容量随之恢复——
-  同一会话的后续回合依然能继续 spawn。
-* **`interrupt_agent` 无法回收槽位。** 只有关闭代理（`close_agent`，它会关停线程）或让处于终态的代理
-  被淘汰才能释放一个槽位。所以"我中断了它，槽位却没回来"是预期行为，而不是 bug。
-
-## 子代理完成会唤醒父代理（引擎行为，与本补丁无关）
-
-子代理汇报的方式是往父代理的邮箱里投一封完成信封。接下来会发生什么，取决于父代理当时在做什么：
-
-* **父代理正阻塞在 `wait_agent` 里** —— 邮箱活动会结束这次等待，同一个 turn 就能读到结果并继续。
-  这条路径不受配置影响。
-* **父代理已经结束了它那一轮** —— 信封只会排队，等到下一次用户输入才投递。于是"派完子代理就收尾"
-  的父代理看起来像是把子代理忘了，直到你再敲一句话。在本构建里，`[agents] wake_parent_on_completion`
-  默认为 `true`，完成信封会被标记为"可触发新一轮"，于是一个结束的子代理会自动拉起父代理的新一轮，
-  父代理自己继续干活。
-
-```toml
-[agents]
-wake_parent_on_completion = true   # true（本构建默认）：子代理结束即唤醒空闲父代理
-                                   # false：上游行为 —— 结果等你的下一句话
-```
-
-只有**已经结束**的子代理才会唤醒空闲父代理：在某一轮还在跑的时候到达的邮件会被并进那一轮，所以多个
-子代理同时结束只会产生一次后续回合，而不是每个子代理各来一轮。把该键设为 `false` 即完全恢复上游行为。
-
-## 已知边界
-
-* **客户端未公开的钩子。** `CODEX_CLI_PATH` 与 `CODEX_APP_SERVER_FORCE_CLI` 是闭源商店客户端读取的
-  变量。它们不属于本仓库、不受支持，且可能随任何一次客户端更新而改变或消失。本集成**从不修改客户端
-  文件**，不绕过代码签名或包完整性校验，并始终保留"官方客户端可用"作为退路。用替代引擎配合该客户端
-  是否符合其使用条款，需要你自己判断。
-* **线协议。** 本构建对供应商只接受 `wire_api = "responses"`。请确认你的供应商实现了它，包括工具调用
-  与长上下文。
-* **模型 slug 是配置，不是常量**：写供应商实际提供的名字。
-* 不带引擎覆盖启动客户端时，选择器仍会列出第二家的模型，但没有任何东西会把它们路由过去。
-
-## 回退
-
-从 `config.toml` 里删掉 `model_catalog_json`、`[model_providers.<id>]`（连同它的 `auth`）与
-`[model_provider_routes]` 三段，然后正常启动客户端即可。
-
-## 不包含什么
-
-客户端文件（`app.asar`、`ChatGPT.exe`、各类 DLL）、生成的模型目录、以及任何形式的凭据。
+开发期验证：
+
+* `cargo nextest run -p codex-app-server model_provider_routing` —— 7 个用例通过。
+* `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 的两个 subagent 用例通过。
+* `routing-e2e.mjs` 对真实引擎：有路由的模型落到其供应商，未路由的保持默认，显式冲突被拒绝。
+* `deepseek-live-probe.mjs --no-env-key` 对真实引擎 + DPAPI 存的 key：供应商返回的 `401` 里能看到所存
+  key 的掩码尾部，证明经 `auth.command` 取得的 token 到达了供应商。
+* UI：未改动的商店客户端选择器同时列出两家模型，且由其创建的会话在 rollout 元数据里记录第二家供应商。
+* `subagent-slot-probe.mjs` 复现上述预算行为。
+* `completed_child_wakes_idle_parent` 覆盖唤醒开关的两侧。
+
+## 不包含
+
+客户端文件（`app.asar`、`ChatGPT.exe`、各类 DLL）、生成的目录、任何凭据。
 
 ## 许可
 
-本补丁应用于 [openai/codex](https://github.com/openai/codex)（Apache-2.0）。`LICENSE` 与 `NOTICE`
-均予保留；`NOTICE` 记录了 Apache-2.0 第 4(b) 条所要求的修改声明。
+本补丁应用于 [openai/codex](https://github.com/openai/codex)（Apache-2.0）。保留 `LICENSE` 与
+`NOTICE`；`NOTICE` 记录了 Apache-2.0 第 4(b) 条要求的修改声明。
