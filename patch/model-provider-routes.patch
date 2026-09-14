@@ -986,6 +986,150 @@ index ac5e47f16c..9233be5f35 100644
      );
  
      Ok(())
+diff --git a/codex-rs/exec/src/lib.rs b/codex-rs/exec/src/lib.rs
+index b56a56f1eb..9b68373ed5 100644
+--- a/codex-rs/exec/src/lib.rs
++++ b/codex-rs/exec/src/lib.rs
+@@ -1036,7 +1036,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
+                 params: ThreadForkParams {
+                     thread_id: source_thread_id,
+                     model: config.model.clone(),
+-                    model_provider: Some(config.model_provider_id.clone()),
++                    model_provider: requested_model_provider(&config),
+                     cwd: Some(config.cwd.to_string_lossy().to_string()),
+                     runtime_workspace_roots: Some(config.workspace_roots.clone()),
+                     approval_policy: Some(config.permissions.approval_policy.value().into()),
+@@ -1355,7 +1355,7 @@ fn thread_start_params_from_config(
+     });
+     ThreadStartParams {
+         model: config.model.clone(),
+-        model_provider: Some(config.model_provider_id.clone()),
++        model_provider: requested_model_provider(config),
+         cwd: Some(config.cwd.to_string_lossy().to_string()),
+         runtime_workspace_roots: Some(config.workspace_roots.clone()),
+         approval_policy: Some(config.permissions.approval_policy.value().into()),
+@@ -1385,7 +1385,7 @@ fn thread_resume_params_from_config(
+     ThreadResumeParams {
+         thread_id,
+         model: config.model.clone(),
+-        model_provider: Some(config.model_provider_id.clone()),
++        model_provider: requested_model_provider(config),
+         cwd: Some(config.cwd.to_string_lossy().to_string()),
+         runtime_workspace_roots: Some(config.workspace_roots.clone()),
+         approval_policy: Some(config.permissions.approval_policy.value().into()),
+@@ -1398,6 +1398,25 @@ fn thread_resume_params_from_config(
+     }
+ }
+ 
++/// Picks the model provider to report to app-server, mirroring the desktop client.
++///
++/// The resolved provider is only a real choice when it agrees with `model_provider_routes`. When it
++/// disagrees, the value is the configured default (or the built-in `openai` fallback) and naming it
++/// would make app-server reject the thread for running a routed model on the wrong provider. Omitting
++/// it lets the routing table decide, exactly as a client that never sends a provider does.
++fn requested_model_provider(config: &Config) -> Option<String> {
++    let provider_id = config.model_provider_id.as_str();
++    let routed_provider = config
++        .model
++        .as_deref()
++        .and_then(|model| config.model_provider_routes.get(model))
++        .map(String::as_str);
++    match routed_provider {
++        Some(routed_provider) if routed_provider != provider_id => None,
++        Some(_) | None => Some(provider_id.to_string()),
++    }
++}
++
+ fn thread_config_overrides_from_config(config: &Config) -> Option<HashMap<String, Value>> {
+     config
+         .bypass_hook_trust
+diff --git a/codex-rs/exec/src/lib_tests.rs b/codex-rs/exec/src/lib_tests.rs
+index fb79e7b839..6facda667a 100644
+--- a/codex-rs/exec/src/lib_tests.rs
++++ b/codex-rs/exec/src/lib_tests.rs
+@@ -314,6 +314,82 @@ fn runtime_warnings_are_filtered_to_the_primary_thread() {
+     assert_eq!(outcomes, [true, true, false, false]);
+ }
+ 
++/// The reported provider must never contradict `model_provider_routes`: naming a provider that the
++/// routing table routes elsewhere makes app-server reject the thread outright.
++///
++/// Each case configures `model_provider` (or omits it), a model, and the provider that
++/// `thread/start` is expected to report.
++#[tokio::test]
++async fn thread_start_defers_to_the_routing_table_over_the_built_in_default() {
++    assert_reported_provider(
++        /*configured_provider*/ None,
++        "deepseek-flash",
++        /*expected_provider*/ None,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn thread_start_keeps_a_configured_provider_that_agrees_with_the_route() {
++    assert_reported_provider(
++        /*configured_provider*/ Some("deepseek"),
++        "deepseek-flash",
++        /*expected_provider*/ Some("deepseek"),
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn thread_start_keeps_a_configured_provider_for_an_unrouted_model() {
++    assert_reported_provider(
++        /*configured_provider*/ Some("openai"),
++        "gpt-5.5",
++        /*expected_provider*/ Some("openai"),
++    )
++    .await;
++}
++
++async fn assert_reported_provider(
++    configured_provider: Option<&str>,
++    model: &str,
++    expected_provider: Option<&str>,
++) {
++    let codex_home = tempdir().expect("create temp codex home");
++    let cwd = tempdir().expect("create temp cwd");
++    let configured_provider = configured_provider
++        .map(|provider| format!("model_provider = \"{provider}\"\n"))
++        .unwrap_or_default();
++    std::fs::write(
++        codex_home.path().join("config.toml"),
++        format!(
++            r#"{configured_provider}model = "{model}"
++
++[model_providers.deepseek]
++name = "DeepSeek"
++base_url = "http://127.0.0.1:9"
++wire_api = "responses"
++requires_openai_auth = false
++
++[model_provider_routes]
++"deepseek-flash" = "deepseek"
++"#,
++        ),
++    )
++    .expect("write config");
++    let config = ConfigBuilder::default()
++        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
++        .codex_home(codex_home.path().to_path_buf())
++        .fallback_cwd(Some(cwd.path().to_path_buf()))
++        .build()
++        .await
++        .expect("build config with a routed model");
++
++    assert_eq!(
++        thread_start_params_from_config(&config, &ThreadSource::User).model_provider,
++        expected_provider.map(str::to_string)
++    );
++}
++
+ #[tokio::test]
+ async fn resume_lookup_model_providers_filters_only_last_lookup() {
+     let codex_home = tempdir().expect("create temp codex home");
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
 index 47ab3e0926..93d0556e4b 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs

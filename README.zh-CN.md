@@ -346,12 +346,6 @@ wake_parent_on_completion = true   # true（本构建默认）：子代理结束
 * **线协议。** 本构建对供应商只接受 `wire_api = "responses"`。请确认你的供应商实现了它，包括工具调用
   与长上下文。
 * **模型 slug 是配置，不是常量**：写供应商实际提供的名字。
-* **`codex exec` 需要 `model_provider` 与路由一致。** CLI 调用 `thread/start` 时总会带上配置里的默认
-  供应商，而引擎会拒绝与 `model_provider_routes` 相矛盾的供应商。如果你按示例配置把默认供应商留作
-  `openai`、只把第二家的模型加入路由，`codex exec` 会报
-  ``model `<slug>` is routed to model provider `<id>` and cannot run on `openai` ``。桌面客户端不发送
-  供应商，因此不受影响。解决办法：在 `config.toml` 里设 `model_provider = "<id>"`，或给 `exec` 传
-  `-c model_provider="<id>"`。
 * 不带引擎覆盖启动客户端时，选择器仍会列出第二家的模型，但没有任何东西会把它们路由过去。
 
 ## 回退

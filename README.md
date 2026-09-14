@@ -381,13 +381,6 @@ rather than one turn each. Setting the key to `false` restores the upstream beha
 * **Wire protocol.** This build only accepts `wire_api = "responses"` for providers. Confirm your
   provider implements it, including tool calls and long contexts.
 * **Model slugs** are configuration, not constants: use what the provider actually serves.
-* **`codex exec` needs `model_provider` to agree with the routes.** The CLI always sends the
-  configured default provider with `thread/start`, and the engine rejects a provider that
-  contradicts `model_provider_routes`. If you keep the default provider as `openai` while routing
-  the second provider's models (as the example config does), `codex exec` fails with
-  ``model `<slug>` is routed to model provider `<id>` and cannot run on `openai` ``. The desktop
-  client does not send a provider, so it is unaffected. Either set `model_provider = "<id>"` in
-  `config.toml` or pass `-c model_provider="<id>"` to `exec`.
 * Starting the client without the engine override leaves the picker showing the second provider's
   models while nothing routes them.
 
