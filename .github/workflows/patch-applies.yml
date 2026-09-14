@@ -1,0 +1,58 @@
+name: patch applies
+
+# Guards the one thing that silently rots in a patch repository: the day the upstream commit this
+# patch was generated against no longer accepts it.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, so drift is noticed even without a push.
+    - cron: '23 4 * * 1'
+
+jobs:
+  patch-applies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the pinned upstream commit from the README
+        id: pin
+        run: |
+          set -euo pipefail
+          sha="$(grep -oE 'git checkout [0-9a-f]{7,40}' README.md | head -n 1 | awk '{print $3}')"
+          if [ -z "$sha" ]; then
+            echo "::error::no 'git checkout <sha>' pin found in README.md"
+            exit 1
+          fi
+          echo "pinned commit: $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch that commit from openai/codex
+        run: |
+          set -euo pipefail
+          sha="${{ steps.pin.outputs.sha }}"
+          git init upstream
+          git -C upstream remote add origin https://github.com/openai/codex.git
+          if ! git -C upstream fetch --depth 1 origin "$sha"; then
+            echo "fetch by SHA failed; falling back to a filtered clone"
+            rm -rf upstream
+            git clone --filter=blob:none --no-checkout https://github.com/openai/codex.git upstream
+            git -C upstream fetch --depth 1 origin "$sha"
+          fi
+          git -C upstream checkout --detach FETCH_HEAD
+
+      - name: Check the patch applies cleanly
+        run: |
+          set -euo pipefail
+          git -C upstream apply --check --verbose "$GITHUB_WORKSPACE/patch/model-provider-routes.patch"
+          echo "patch applies to ${{ steps.pin.outputs.sha }}"
+
+      - name: Apply it and summarize what it touches
+        run: |
+          set -euo pipefail
+          git -C upstream apply "$GITHUB_WORKSPACE/patch/model-provider-routes.patch"
+          git -C upstream status --short
+          echo "--- diffstat ---"
+          git -C upstream diff --stat | tail -n 1

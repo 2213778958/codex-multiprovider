@@ -1,5 +1,7 @@
 # codex-multiprovider (unofficial patch)
 
+[![patch applies](https://github.com/<owner>/codex-multiprovider/actions/workflows/patch-applies.yml/badge.svg)](https://github.com/<owner>/codex-multiprovider/actions/workflows/patch-applies.yml)
+
 Per-session model provider selection for Codex: pick an OpenAI model or a model from a second
 provider (for example DeepSeek) in the existing model picker, and keep each session pinned to the
 provider it started with. The desktop UI is not modified.
