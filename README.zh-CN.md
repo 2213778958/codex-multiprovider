@@ -24,7 +24,7 @@
 
 | 部分 | 路径 | 作用 |
 | --- | --- | --- |
-| 引擎补丁 | `patch/model-provider-routes.patch`（codex-rs，16 个文件） | 新增 `model_provider_routes` |
+| 引擎补丁 | `patch/model-provider-routes.patch`（codex-rs，18 个文件） | 新增 `model_provider_routes`，并把客户端需要的引擎版本钉住 |
 | 合并目录 | `tools/merge-model-catalogs.mjs` | `model_catalog_json` 会整体替换账户目录，因此一个文件必须同时含两家的模型 |
 | 本机中转 | `tools/deepseek-proxy.mjs`，只绑定 `127.0.0.1` | 把 `agent_message` 项和缺 `call_id` 的 `function_call_output` 项改写成 user 消息；没有它，每个 spawn 出来的子代理都会拿到空任务，派发出去的线程会被供应商拒绝 |
 
@@ -209,7 +209,7 @@ cd codex-rs
 cargo build -p codex-cli --bin codex --release
 ```
 
-`-3` 做三方合并，而不是在第一个不匹配处失败；剩余冲突手动解决即可（补丁只碰 `codex-rs`，16 个文件）。
+`-3` 做三方合并，而不是在第一个不匹配处失败；剩余冲突手动解决即可（补丁只碰 `codex-rs`，18 个文件）。
 若 Git 报缺 blob，先跑 `git fetch --unshallow`。切换前按[验证](#验证)一节的命令确认；启动器会自动采用
 `target\release\codex.exe`，也可先用 `-CodexExe <路径>` 试跑。
 
@@ -242,6 +242,8 @@ powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1   # 仅在图�
 | 选择器里缺 OpenAI 模型 | 合并目录里没有它们 | 用有内容的 `models_cache.json` 重跑 `merge-model-catalogs.mjs` |
 | `Patched engine not found` | 构建不在启动器搜索的两个 `codex-rs\target` 位置 | `tools\start-desktop-deepseek.ps1 -CodexExe <路径>` |
 | `The '<model>' model is not supported when using Codex with a ChatGPT account` | 会话停在默认供应商上却带着有路由的模型；默认模型路由落地之前的构建，对不带模型的线程（如 `create_thread` 派发）就会这样 | 用含该修复的 checkout 重新编译引擎，然后重建该线程 |
+| `Forking is not available for threads using paginated history yet`，或新线程在 `legacy` / `paginated` 间摇摆 | 商店客户端按 app-server 版本决定这些能力（分页线程的分支要 ≥ `0.146.0-alpha.7`，ephemeral 分支要 ≥ `0.146.0-alpha.8`），而源码自建引擎报 `0.0.0` | 用本补丁编译（它把 `codex-rs/Cargo.toml` 钉到 `0.146.0-alpha.8`），或自行抬高版本号；改完重启客户端 |
+| 工作树分支报 `Failed to collect working tree diff` | 客户端要把未提交改动带进新工作树，做法是在源仓库里 `git add -u`；仓库（或其 `.git`）被 ACL 拒绝写入时就失败 | 临时解除该仓库的写保护；或把起始状态改成某个分支/提交（不携带工作区改动）；或改用同目录分支 |
 
 日志：`%USERPROFILE%\.codex\proxy-log.jsonl`（仅传 `--body-dir` 时记录请求体）、
 `%USERPROFILE%\.codex\proxy-watchdog.log`、`%USERPROFILE%\.codex\proxy-watchdog-<port>.json`。
@@ -252,6 +254,7 @@ powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1   # 仅在图�
 | --- | --- |
 | 配置 | `model_provider_routes`：`"<模型 slug>" = "<供应商 id>"` |
 | `thread/start` | 有路由的模型落在其供应商上；显式给出相冲突的供应商被拒绝；请求不带模型时按配置里的默认 `model` 路由 |
+| 引擎版本 | `codex-rs/Cargo.toml` 报 `0.146.0-alpha.8`；客户端按 app-server 版本门控功能，`0.0.0` 的源码构建会被当成上古版本 |
 | `thread/resume` | 保持会话创建时的供应商 |
 | `thread/settings/update` | 切到别家供应商的模型被拒绝 |
 | 子代理 spawn | 别家供应商的模型被拒绝（子代理继承父代理供应商） |
@@ -314,6 +317,13 @@ node --test tools\proxy-transforms.test.mjs
 `stop-proxy.ps1` 总是先停看门狗再停中转。
 
 ## 参考：引擎行为（与本补丁无关）
+
+### 线程历史模式
+
+* `legacy`：每条线程一个只追加的 rollout 文件（`%USERPROFILE%\.codex\sessions\<日期>\rollout-*.jsonl`）；恢复会话时整份读入。
+* `paginated`：同一份 rollout 会被投影进 `%USERPROFILE%\.codex\thread_history_1.sqlite`（`thread_turns`、`thread_items`），客户端按页读取（`thread/turns/list`、`thread/items/list`）。显示用的元数据改从 SQLite 取，因为分页后的 rollout 可能只剩一个后缀。
+* 迁移是单向的：`background_paginated_rollout_migration` 会在后台把 legacy 线程迁成 paginated，陈旧的 legacy 元数据不会把它降级回去。
+* 模式由客户端按 app-server 版本决定（见「疑难排解」）：引擎报 `0.0.0` 时它会两种混用，而给 paginated 线程开分支需要它能识别的版本。
 
 ### 子代理限额
 
@@ -381,7 +391,7 @@ wake_parent_on_completion = true   # true（本构建默认）：子代理结束
 ## 仓库内容
 
 ```
-patch/model-provider-routes.patch   仅引擎改动（codex-rs，16 个文件）
+patch/model-provider-routes.patch   仅引擎改动（codex-rs，18 个文件）
 tools/                              集成工具，可直接使用：
                                       install-engine.ps1/.cmd           克隆 + 打补丁 + 编译引擎
                                       start-desktop-deepseek.ps1/.cmd   启动器
@@ -401,6 +411,7 @@ config/                             示例配置片段 + 最小目录模板
 开发期验证：
 
 * `cargo nextest run -p codex-app-server model_provider_routing` —— 8 个用例通过。
+* `codex --version`（以及客户端读的 app-server 握手）报 `0.146.0-alpha.8` 而不是 `0.0.0`，客户端因此不再关闭「分页线程开分支」这类能力。
 * `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 的两个 subagent 用例通过。
 * `routing-e2e.mjs` 对真实引擎：有路由的模型落到其供应商，未路由的保持默认，请求不带模型时按配置
   默认模型路由，显式冲突被拒绝。

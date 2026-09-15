@@ -26,7 +26,7 @@ session to the provider it starts on. The desktop client is not modified.
 
 | Piece | Path | Purpose |
 | --- | --- | --- |
-| Engine patch | `patch/model-provider-routes.patch` (codex-rs, 16 files) | adds `model_provider_routes` |
+| Engine patch | `patch/model-provider-routes.patch` (codex-rs, 18 files) | adds `model_provider_routes` and pins the engine version the desktop client expects |
 | Merged catalog | `tools/merge-model-catalogs.mjs` | `model_catalog_json` replaces the account catalog, so one file must hold both providers' models |
 | Local proxy | `tools/deepseek-proxy.mjs`, bound to `127.0.0.1` | rewrites `agent_message` items and `call_id`-less `function_call_output` items into user messages; without it every spawned subagent gets an empty task and a delegated thread is rejected |
 
@@ -219,7 +219,7 @@ cargo build -p codex-cli --bin codex --release
 ```
 
 `-3` three-way merges instead of failing at the first mismatch; resolve remaining conflicts by hand —
-the patch touches `codex-rs` only, 16 files. If Git reports a missing blob, run `git fetch
+the patch touches `codex-rs` only, 18 files. If Git reports a missing blob, run `git fetch
 --unshallow` first. Verify with the commands under [Verify](#verify) before switching; the launcher
 picks up `target\release\codex.exe`, or try the new binary once with `-CodexExe <path>`.
 
@@ -254,6 +254,8 @@ rebuild the engine.
 | OpenAI models missing from the picker | the merged catalog lacks them | re-run `merge-model-catalogs.mjs` against a populated `models_cache.json` |
 | `Patched engine not found` | the build is outside the two `codex-rs\target` locations | `tools\start-desktop-deepseek.ps1 -CodexExe <path>` |
 | `The '<model>' model is not supported when using Codex with a ChatGPT account` | the session started on the default provider while running a routed model; builds before the default-model routing landed did this for threads created without a model, such as `create_thread` delegations | rebuild the engine from a checkout that includes the fix, then recreate the thread |
+| `Forking is not available for threads using paginated history yet`, or new threads flip between `legacy` and `paginated` | the Store client gates paginated forks on the app-server version (`>= 0.146.0-alpha.7`, `>= 0.146.0-alpha.8` for ephemeral forks) and a source build reports `0.0.0` | build from this patch (it pins `0.146.0-alpha.8` in `codex-rs/Cargo.toml`) or raise that version; then restart the client |
+| `Failed to collect working tree diff` when branching a thread into a new worktree | the client carries the uncommitted diff by staging it in the source repository, which a write-protected repository (ACL deny on the tree or `.git`) refuses | unlock the repository for the duration, start the worktree from a branch/commit instead of the working tree, or branch in the same directory |
 
 Logs: `%USERPROFILE%\.codex\proxy-log.jsonl` (request bodies only with `--body-dir`),
 `%USERPROFILE%\.codex\proxy-watchdog.log`, `%USERPROFILE%\.codex\proxy-watchdog-<port>.json`.
@@ -268,6 +270,7 @@ Logs: `%USERPROFILE%\.codex\proxy-log.jsonl` (request bodies only with `--body-d
 | `thread/settings/update` | switching to another provider's model is rejected |
 | Subagent spawn | a foreign-provider model is rejected (children inherit the parent provider) |
 | Config load | a route naming an unknown provider fails loading |
+| Engine version | `codex-rs/Cargo.toml` reports `0.146.0-alpha.8`; the desktop client gates features on the app-server version and treats a `0.0.0` source build as ancient |
 
 ## Reference: proxy
 
@@ -337,6 +340,13 @@ consecutive restart failures. `-NoWatchdog` disables it. `stop-proxy.ps1` always
 before the proxy.
 
 ## Reference: engine behavior (not this patch)
+
+### Thread history modes
+
+* `legacy`: one append-only rollout file per thread (`%USERPROFILE%\.codex\sessions\<date>\rollout-*.jsonl`); a resume reads the whole file.
+* `paginated`: the same rollout is projected into `%USERPROFILE%\.codex\thread_history_1.sqlite` (`thread_turns`, `thread_items`) and the client reads it page by page (`thread/turns/list`, `thread/items/list`). Display metadata moves to SQLite, because a paginated rollout may only carry a suffix.
+* Promotion is one-way: the `background_paginated_rollout_migration` feature migrates legacy threads in the background, and stale legacy metadata never downgrades them.
+* The client picks the mode from the app-server version (see Troubleshooting): with a `0.0.0` engine it flip-flops between the two, and branching a paginated thread needs a version it recognises.
 
 ### Subagent limits
 
@@ -414,7 +424,7 @@ stock provider URL, and subagent tasks stop arriving.
 ## Contents
 
 ```
-patch/model-provider-routes.patch   engine change only (codex-rs, 16 files)
+patch/model-provider-routes.patch   engine change only (codex-rs, 18 files)
 tools/                              integration tooling, usable as-is:
                                       install-engine.ps1/.cmd           clone + patch + build the engine
                                       start-desktop-deepseek.ps1/.cmd   launcher
@@ -442,6 +452,8 @@ Development verification:
   own `401` shows the masked tail of the stored key, proving the token from `auth.command` reached it.
 * UI: the unmodified Store client's picker lists both providers' models, and a session created from it
   records the second provider in its rollout metadata.
+* `codex --version` (and the app-server handshake the client reads) reports `0.146.0-alpha.8` instead
+  of `0.0.0`, so the client stops gating features like forking paginated threads.
 * `subagent-slot-probe.mjs` reproduces the budget behavior above.
 * `completed_child_wakes_idle_parent` covers both sides of the wake switch.
 
