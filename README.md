@@ -169,7 +169,7 @@ node tools\routing-e2e.mjs "<path to codex.exe>" "<CODEX_HOME with the config>"
 node tools\deepseek-live-probe.mjs "<path to codex.exe>" "<CODEX_HOME>" --no-env-key
 ```
 
-Engine test suites: `cargo nextest run -p codex-app-server model_provider_routing` (7 cases), the two
+Engine test suites: `cargo nextest run -p codex-app-server model_provider_routing` (8 cases), the two
 subagent cases in `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`, and
 `cargo test -p codex-core --test all completed_child_wakes_idle_parent`.
 
@@ -288,7 +288,7 @@ end (with the rewrite, a subagent spawned with `fork_turns: "none"` still receiv
 task).
 
 `deepseek-proxy.mjs` rewrites those items into plain user messages using the `encrypted_content` part.
-Tools, reasoning items, function calls, headers, and streaming pass through unchanged.
+Tool calls, reasoning items, headers, and streaming pass through unchanged.
 
 The same proxy repairs the other item a delegated thread is built from. The desktop client starts an
 agent-created thread with the `create_thread` result injected as a `function_call_output` that has no
@@ -433,10 +433,11 @@ config/                             example config snippet + minimal catalog tem
 
 Development verification:
 
-* `cargo nextest run -p codex-app-server model_provider_routing` — 7 cases pass.
+* `cargo nextest run -p codex-app-server model_provider_routing` — 8 cases pass.
 * Two subagent cases in `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` pass.
 * `routing-e2e.mjs` against a real engine: a routed model lands on its provider, an unrouted model
-  keeps the default, and a contradictory explicit provider is rejected.
+  keeps the default, a request that names no model is routed by the config default, and a
+  contradictory explicit provider is rejected.
 * `deepseek-live-probe.mjs --no-env-key` against a real engine and a DPAPI-stored key: the provider's
   own `401` shows the masked tail of the stored key, proving the token from `auth.command` reached it.
 * UI: the unmodified Store client's picker lists both providers' models, and a session created from it

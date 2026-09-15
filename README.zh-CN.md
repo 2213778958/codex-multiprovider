@@ -24,9 +24,9 @@
 
 | 部分 | 路径 | 作用 |
 | --- | --- | --- |
-| 引擎补丁 | `patch/model-provider-routes.patch`（codex-rs，10 个文件） | 新增 `model_provider_routes` |
+| 引擎补丁 | `patch/model-provider-routes.patch`（codex-rs，16 个文件） | 新增 `model_provider_routes` |
 | 合并目录 | `tools/merge-model-catalogs.mjs` | `model_catalog_json` 会整体替换账户目录，因此一个文件必须同时含两家的模型 |
-| 本机中转 | `tools/deepseek-proxy.mjs`，只绑定 `127.0.0.1` | 把 `agent_message` 项改写成 user 消息；没有它，每个 spawn 出来的子代理都会拿到空任务 |
+| 本机中转 | `tools/deepseek-proxy.mjs`，只绑定 `127.0.0.1` | 把 `agent_message` 项和缺 `call_id` 的 `function_call_output` 项改写成 user 消息；没有它，每个 spawn 出来的子代理都会拿到空任务，派发出去的线程会被供应商拒绝 |
 
 `tools/` 其余部分是启动器、看门狗、key 存储与验证探针。
 
@@ -162,7 +162,7 @@ node tools\routing-e2e.mjs "<codex.exe 路径>" "<含该配置的 CODEX_HOME>"
 node tools\deepseek-live-probe.mjs "<codex.exe 路径>" "<CODEX_HOME>" --no-env-key
 ```
 
-引擎测试：`cargo nextest run -p codex-app-server model_provider_routing`（7 个用例）、
+引擎测试：`cargo nextest run -p codex-app-server model_provider_routing`（8 个用例）、
 `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 的两个 subagent 用例、以及
 `cargo test -p codex-core --test all completed_child_wakes_idle_parent`。
 
@@ -209,7 +209,7 @@ cd codex-rs
 cargo build -p codex-cli --bin codex --release
 ```
 
-`-3` 做三方合并，而不是在第一个不匹配处失败；剩余冲突手动解决即可（补丁只碰 `codex-rs`，10 个文件）。
+`-3` 做三方合并，而不是在第一个不匹配处失败；剩余冲突手动解决即可（补丁只碰 `codex-rs`，16 个文件）。
 若 Git 报缺 blob，先跑 `git fetch --unshallow`。切换前按[验证](#验证)一节的命令确认；启动器会自动采用
 `target\release\codex.exe`，也可先用 `-CodexExe <路径>` 试跑。
 
@@ -241,6 +241,7 @@ powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1   # 仅在图�
 | `...get-provider-key.ps1' to the -File parameter does not exist` | 运行中的会话指向已移动的取 key 脚本 | 重跑 `tools\install-tools.ps1`，重启会话 |
 | 选择器里缺 OpenAI 模型 | 合并目录里没有它们 | 用有内容的 `models_cache.json` 重跑 `merge-model-catalogs.mjs` |
 | `Patched engine not found` | 构建不在启动器搜索的两个 `codex-rs\target` 位置 | `tools\start-desktop-deepseek.ps1 -CodexExe <路径>` |
+| `The '<model>' model is not supported when using Codex with a ChatGPT account` | 会话停在默认供应商上却带着有路由的模型；默认模型路由落地之前的构建，对不带模型的线程（如 `create_thread` 派发）就会这样 | 用含该修复的 checkout 重新编译引擎，然后重建该线程 |
 
 日志：`%USERPROFILE%\.codex\proxy-log.jsonl`（仅传 `--body-dir` 时记录请求体）、
 `%USERPROFILE%\.codex\proxy-watchdog.log`、`%USERPROFILE%\.codex\proxy-watchdog-<port>.json`。
@@ -250,7 +251,7 @@ powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1   # 仅在图�
 | 位置 | 行为 |
 | --- | --- |
 | 配置 | `model_provider_routes`：`"<模型 slug>" = "<供应商 id>"` |
-| `thread/start` | 有路由的模型落在其供应商上；显式给出相冲突的供应商被拒绝 |
+| `thread/start` | 有路由的模型落在其供应商上；显式给出相冲突的供应商被拒绝；请求不带模型时按配置里的默认 `model` 路由 |
 | `thread/resume` | 保持会话创建时的供应商 |
 | `thread/settings/update` | 切到别家供应商的模型被拒绝 |
 | 子代理 spawn | 别家供应商的模型被拒绝（子代理继承父代理供应商） |
@@ -272,14 +273,31 @@ powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1   # 仅在图�
 已通过对照实验确认（同一段文字作为普通 `message` 能被理解，作为 `agent_message` 不能），也做了端到端确认
 （经改写后，用 `fork_turns: "none"` 启动的子代理仍收到并执行了任务）。
 
-`deepseek-proxy.mjs` 从 `encrypted_content` 段取出正文，把这些项改写成普通 user 消息；tools、
-reasoning 项、function call、请求头与流式响应原样透传。
+`deepseek-proxy.mjs` 从 `encrypted_content` 段取出正文，把这些项改写成普通 user 消息；工具调用、
+reasoning 项、请求头与流式响应原样透传。
+
+同一个中转还要修派发线程赖以建立的另一种项。桌面客户端创建 agent 线程时，会把 `create_thread`
+的结果作为一条**没有 `call_id`** 的 `function_call_output` 注入：
+
+```json
+{"type":"function_call_output","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>…</codex_delegation>"}
+```
+
+工具结果没有这个 id 就无法与任何函数调用对应，而各家供应商的容忍度不同：不容忍的会直接以
+`missing field call_id` 拒绝整个请求。中转把该项改写成它本来就是的普通 user 消息，任务因此能到达
+供应商。改写逻辑在 `proxy-transforms.mjs`（纯 ESM，由中转 import）：
+
+```powershell
+node --test tools\proxy-transforms.test.mjs
+```
 
 * 解析或改写失败时转发原始字节；最坏情况等同于没有中转，只是子代理任务又会丢失。
 * 日志尽力而为，绝不因写日志让请求失败；只有传 `--body-dir` 才落盘请求体。
 * `GET /__proxy/health` 返回标记：启动器据此识别中转，`stop-proxy.ps1` 只杀回应标记的进程。
 * 长流式回合不设超时；未捕获异常只记日志，不会中断进程。
 * `agent_message` 正文不可读时该项保持原样，并计入 `unreadableAgentMessages`；绝不把密文当作任务注入。
+* `function_call_output` 正文不可读时该项保持原样，并计入 `unreadableItems`；成功改写的条数记在
+  `repairedCallOutputs`。
 
 端口：`base_url` 必须是字面量（引擎不展开配置值里的环境变量）。启动器：
 
@@ -363,7 +381,7 @@ wake_parent_on_completion = true   # true（本构建默认）：子代理结束
 ## 仓库内容
 
 ```
-patch/model-provider-routes.patch   仅引擎改动（codex-rs，10 个文件）
+patch/model-provider-routes.patch   仅引擎改动（codex-rs，16 个文件）
 tools/                              集成工具，可直接使用：
                                       install-engine.ps1/.cmd           克隆 + 打补丁 + 编译引擎
                                       start-desktop-deepseek.ps1/.cmd   启动器
@@ -382,9 +400,10 @@ config/                             示例配置片段 + 最小目录模板
 
 开发期验证：
 
-* `cargo nextest run -p codex-app-server model_provider_routing` —— 7 个用例通过。
+* `cargo nextest run -p codex-app-server model_provider_routing` —— 8 个用例通过。
 * `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 的两个 subagent 用例通过。
-* `routing-e2e.mjs` 对真实引擎：有路由的模型落到其供应商，未路由的保持默认，显式冲突被拒绝。
+* `routing-e2e.mjs` 对真实引擎：有路由的模型落到其供应商，未路由的保持默认，请求不带模型时按配置
+  默认模型路由，显式冲突被拒绝。
 * `deepseek-live-probe.mjs --no-env-key` 对真实引擎 + DPAPI 存的 key：供应商返回的 `401` 里能看到所存
   key 的掩码尾部，证明经 `auth.command` 取得的 token 到达了供应商。
 * UI：未改动的商店客户端选择器同时列出两家模型，且由其创建的会话在 rollout 元数据里记录第二家供应商。
