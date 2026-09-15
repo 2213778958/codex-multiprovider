@@ -54,6 +54,15 @@ try {
   const routed = await rpc('thread/start', { ...common, model: 'deepseek-flash' });
   results.push(`thread/start(model=deepseek-flash, no provider) -> provider=${routed.modelProvider} model=${routed.model}`);
 
+  // The desktop client's `create_thread` tool starts a delegated thread without naming a model, so
+  // the config default decides the model and the route has to follow that decision.
+  const defaulted = await rpc('thread/start', common);
+  results.push(`thread/start(no model) -> provider=${defaulted.modelProvider} model=${defaulted.model}`);
+  if (defaulted.model === 'deepseek-flash' && defaulted.modelProvider !== 'deepseek') {
+    results.push('thread/start(no model) -> UNEXPECTEDLY NOT ROUTED');
+    process.exitCode = 1;
+  }
+
   const openai = await rpc('thread/start', { ...common, model: 'gpt-5.5' });
   results.push(`thread/start(model=gpt-5.5, no provider) -> provider=${openai.modelProvider} model=${openai.model}`);
 

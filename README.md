@@ -26,9 +26,9 @@ session to the provider it starts on. The desktop client is not modified.
 
 | Piece | Path | Purpose |
 | --- | --- | --- |
-| Engine patch | `patch/model-provider-routes.patch` (codex-rs, 10 files) | adds `model_provider_routes` |
+| Engine patch | `patch/model-provider-routes.patch` (codex-rs, 16 files) | adds `model_provider_routes` |
 | Merged catalog | `tools/merge-model-catalogs.mjs` | `model_catalog_json` replaces the account catalog, so one file must hold both providers' models |
-| Local proxy | `tools/deepseek-proxy.mjs`, bound to `127.0.0.1` | rewrites `agent_message` items into user messages; without it every spawned subagent gets an empty task |
+| Local proxy | `tools/deepseek-proxy.mjs`, bound to `127.0.0.1` | rewrites `agent_message` items and `call_id`-less `function_call_output` items into user messages; without it every spawned subagent gets an empty task and a delegated thread is rejected |
 
 The rest of `tools/` is the launcher, watchdog, key storage, and probes.
 
@@ -219,7 +219,7 @@ cargo build -p codex-cli --bin codex --release
 ```
 
 `-3` three-way merges instead of failing at the first mismatch; resolve remaining conflicts by hand —
-the patch touches `codex-rs` only, 10 files. If Git reports a missing blob, run `git fetch
+the patch touches `codex-rs` only, 16 files. If Git reports a missing blob, run `git fetch
 --unshallow` first. Verify with the commands under [Verify](#verify) before switching; the launcher
 picks up `target\release\codex.exe`, or try the new binary once with `-CodexExe <path>`.
 
@@ -253,6 +253,7 @@ rebuild the engine.
 | `...get-provider-key.ps1' to the -File parameter does not exist` | a running session points at a moved key script | re-run `tools\install-tools.ps1`, restart the session |
 | OpenAI models missing from the picker | the merged catalog lacks them | re-run `merge-model-catalogs.mjs` against a populated `models_cache.json` |
 | `Patched engine not found` | the build is outside the two `codex-rs\target` locations | `tools\start-desktop-deepseek.ps1 -CodexExe <path>` |
+| `The '<model>' model is not supported when using Codex with a ChatGPT account` | the session started on the default provider while running a routed model; builds before the default-model routing landed did this for threads created without a model, such as `create_thread` delegations | rebuild the engine from a checkout that includes the fix, then recreate the thread |
 
 Logs: `%USERPROFILE%\.codex\proxy-log.jsonl` (request bodies only with `--body-dir`),
 `%USERPROFILE%\.codex\proxy-watchdog.log`, `%USERPROFILE%\.codex\proxy-watchdog-<port>.json`.
@@ -262,7 +263,7 @@ Logs: `%USERPROFILE%\.codex\proxy-log.jsonl` (request bodies only with `--body-d
 | Area | Behavior |
 | --- | --- |
 | Config | `model_provider_routes`: `"<model slug>" = "<provider id>"` |
-| `thread/start` | a routed model starts on its provider; a contradictory explicit provider is rejected |
+| `thread/start` | a routed model starts on its provider; a contradictory explicit provider is rejected; a request that names no model is routed by the config's default `model` |
 | `thread/resume` | keeps the provider the session was created with |
 | `thread/settings/update` | switching to another provider's model is rejected |
 | Subagent spawn | a foreign-provider model is rejected (children inherit the parent provider) |
@@ -289,6 +290,23 @@ task).
 `deepseek-proxy.mjs` rewrites those items into plain user messages using the `encrypted_content` part.
 Tools, reasoning items, function calls, headers, and streaming pass through unchanged.
 
+The same proxy repairs the other item a delegated thread is built from. The desktop client starts an
+agent-created thread with the `create_thread` result injected as a `function_call_output` that has no
+`call_id`:
+
+```json
+{"type":"function_call_output","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>…</codex_delegation>"}
+```
+
+A tool result cannot be matched to a function call without that id, and providers differ on whether
+they tolerate it: the ones that do not reject the whole request with `missing field call_id`. The
+proxy rewrites the item into the plain user message it really is, so the delegated task reaches the
+provider. The rewrites live in `proxy-transforms.mjs` (plain ESM, imported by the proxy):
+
+```powershell
+node --test tools\proxy-transforms.test.mjs
+```
+
 * Parse or rewrite failure forwards the original bytes; never worse than running without the proxy,
   except that subagent tasks go missing again.
 * Logging is best effort and never fails a request; bodies are written only with `--body-dir`.
@@ -297,6 +315,8 @@ Tools, reasoning items, function calls, headers, and streaming pass through unch
 * Request timeouts are disabled for long streaming turns; uncaught errors are logged, not fatal.
 * An unreadable `agent_message` payload is left untouched and counted in `unreadableAgentMessages`;
   ciphertext is never injected as a task.
+* A `function_call_output` that cannot be read verbatim is left untouched and counted in
+  `unreadableItems`; the repaired count is logged as `repairedCallOutputs`.
 
 Ports: `base_url` must be a literal, since the engine does not expand environment variables in config
 values. The launcher:
@@ -394,7 +414,7 @@ stock provider URL, and subagent tasks stop arriving.
 ## Contents
 
 ```
-patch/model-provider-routes.patch   engine change only (codex-rs, 10 files)
+patch/model-provider-routes.patch   engine change only (codex-rs, 16 files)
 tools/                              integration tooling, usable as-is:
                                       install-engine.ps1/.cmd           clone + patch + build the engine
                                       start-desktop-deepseek.ps1/.cmd   launcher

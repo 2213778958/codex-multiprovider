@@ -29,7 +29,7 @@ index 9e73f535a6..5d460a34e9 100644
      thread_manager: &ThreadManager,
      environments: Option<Vec<TurnEnvironmentParams>>,
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index de98fc7cde..ed985efe15 100644
+index de98fc7cde..ca2622b316 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -276,6 +276,17 @@ fn has_model_resume_override(
@@ -50,14 +50,18 @@ index de98fc7cde..ed985efe15 100644
  fn has_permission_override(
      request_overrides: Option<&HashMap<String, serde_json::Value>>,
      typesafe_overrides: &ConfigOverrides,
-@@ -1205,6 +1216,21 @@ impl ThreadRequestProcessor {
+@@ -1205,6 +1216,25 @@ impl ThreadRequestProcessor {
              personality,
          );
          typesafe_overrides.ephemeral = ephemeral;
 +        let requested_model = typesafe_overrides
 +            .model
 +            .clone()
-+            .or_else(|| request_config_string(config.as_ref(), "model"));
++            .or_else(|| request_config_string(config.as_ref(), "model"))
++            // A request that names no model runs the config's default model, so the route has to
++            // follow that model instead of leaving the session on the default provider. The
++            // desktop client's `create_thread` tool starts delegated threads exactly that way.
++            .or_else(|| self.config.model.clone());
 +        let requested_provider = typesafe_overrides
 +            .model_provider
 +            .clone()
@@ -72,7 +76,7 @@ index de98fc7cde..ed985efe15 100644
          let listener_task_context = ListenerTaskContext {
              thread_manager: Arc::clone(&self.thread_manager),
              thread_state_manager: self.thread_state_manager.clone(),
-@@ -1669,6 +1695,54 @@ impl ThreadRequestProcessor {
+@@ -1669,6 +1699,54 @@ impl ThreadRequestProcessor {
          }
      }
  
@@ -127,7 +131,7 @@ index de98fc7cde..ed985efe15 100644
      async fn thread_archive_inner(
          &self,
          params: ThreadArchiveParams,
-@@ -3846,6 +3920,27 @@ impl ThreadRequestProcessor {
+@@ -3846,6 +3924,27 @@ impl ThreadRequestProcessor {
              )
              .await;
  
@@ -189,10 +193,10 @@ index 73928ce666..e04421258b 100644
  mod output_schema;
 diff --git a/codex-rs/app-server/tests/suite/v2/model_provider_routing_tests.rs b/codex-rs/app-server/tests/suite/v2/model_provider_routing_tests.rs
 new file mode 100644
-index 0000000000..a2338646e1
+index 0000000000..c7ed252316
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/model_provider_routing_tests.rs
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,227 @@
 +//! Verifies that a model listed in `model_provider_routes` runs on the provider that serves it
 +//! and that a session which is already pinned to a provider cannot switch providers.
 +
@@ -226,10 +230,22 @@ index 0000000000..a2338646e1
 +}
 +
 +async fn routed_test_server() -> Result<(MockServer, TempDir, TestAppServer)> {
++    routed_test_server_with_default_model("mock-model").await
++}
++
++/// Same as [`routed_test_server`], but the config's own default model is the routed one.
++///
++/// `create_thread` delegations have this shape: the desktop client starts the delegated thread
++/// without naming a model, so the config default decides which model the session runs, and the
++/// route has to follow that decision.
++async fn routed_test_server_with_default_model(
++    default_model: &str,
++) -> Result<(MockServer, TempDir, TestAppServer)> {
 +    let default_provider = MockServer::start().await;
 +    let deepseek = MockServer::start().await;
 +    let home = TempDir::new()?;
 +    MockResponsesConfig::new(&default_provider.uri())
++        .with_model(default_model)
 +        .with_extra_config(&routed_model_provider_config(&deepseek.uri()))
 +        .write(home.path())?;
 +    let server = TestAppServer::builder()
@@ -249,6 +265,18 @@ index 0000000000..a2338646e1
 +            ..Default::default()
 +        })
 +        .await?;
++
++    assert_eq!(started.model, "deepseek-flash");
++    assert_eq!(started.model_provider, "deepseek");
++    Ok(())
++}
++
++#[tokio::test]
++async fn thread_start_routes_the_config_default_model_when_the_request_names_none() -> Result<()> {
++    let (_deepseek, _home, mut server) =
++        routed_test_server_with_default_model("deepseek-flash").await?;
++
++    let started = server.start_thread(ThreadStartParams::default()).await?;
 +
 +    assert_eq!(started.model, "deepseek-flash");
 +    assert_eq!(started.model_provider, "deepseek");
