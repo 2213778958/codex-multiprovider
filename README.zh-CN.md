@@ -242,7 +242,8 @@ powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1   # 仅在图�
 | 选择器里缺 OpenAI 模型 | 合并目录里没有它们 | 用有内容的 `models_cache.json` 重跑 `merge-model-catalogs.mjs` |
 | `Patched engine not found` | 构建不在启动器搜索的两个 `codex-rs\target` 位置 | `tools\start-desktop-deepseek.ps1 -CodexExe <路径>` |
 | `The '<model>' model is not supported when using Codex with a ChatGPT account` | 会话停在默认供应商上却带着有路由的模型；默认模型路由落地之前的构建，对不带模型的线程（如 `create_thread` 派发）就会这样 | 用含该修复的 checkout 重新编译引擎，然后重建该线程 |
-| `Forking is not available for threads using paginated history yet`，或新线程在 `legacy` / `paginated` 间摇摆 | 商店客户端按 app-server 版本决定这些能力（分页线程的分支要 ≥ `0.146.0-alpha.7`，ephemeral 分支要 ≥ `0.146.0-alpha.8`），而源码自建引擎报 `0.0.0` | 用本补丁编译（它把 `codex-rs/Cargo.toml` 钉到 `0.146.0-alpha.8`），或自行抬高版本号；改完重启客户端 |
+| `Forking is not available for threads using paginated history yet`，或新线程在 `legacy` / `paginated` 间摇摆 | 商店客户端按 app-server 版本决定这些能力（分页线程的分支要 ≥ `0.146.0-alpha.7`，ephemeral 分支要 ≥ `0.146.0-alpha.8`），而源码自建引擎报 `0.0.0` | 用本补丁编译（它把 `codex-rs/Cargo.toml` 钉到当前发布线），或自行抬高版本号；改完重启客户端 |
+| `The '<model>' model requires a newer version of Codex` | ChatGPT 后端也按引擎上报的版本门控模型；源码构建报 `0.0.0`（或钉的版本低于该模型的下限）就会被拒 | 用本补丁编译（它钉到 `0.154.0`），或把 `codex-rs/Cargo.toml` 抬到该模型要求的版本，然后重编并重启客户端 |
 | 工作树分支报 `Failed to collect working tree diff` | 客户端要把未提交改动带进新工作树，做法是在源仓库里 `git add -u`；仓库（或其 `.git`）被 ACL 拒绝写入时就失败 | 临时解除该仓库的写保护；或把起始状态改成某个分支/提交（不携带工作区改动）；或改用同目录分支 |
 
 日志：`%USERPROFILE%\.codex\proxy-log.jsonl`（仅传 `--body-dir` 时记录请求体）、
@@ -254,7 +255,7 @@ powershell -ExecutionPolicy Bypass -File tools\make-shortcut.ps1   # 仅在图�
 | --- | --- |
 | 配置 | `model_provider_routes`：`"<模型 slug>" = "<供应商 id>"` |
 | `thread/start` | 有路由的模型落在其供应商上；显式给出相冲突的供应商被拒绝；请求不带模型时按配置里的默认 `model` 路由 |
-| 引擎版本 | `codex-rs/Cargo.toml` 报 `0.146.0-alpha.8`；客户端按 app-server 版本门控功能，`0.0.0` 的源码构建会被当成上古版本 |
+| 引擎版本 | `codex-rs/Cargo.toml` 报 `0.154.0`；客户端按 app-server 版本门控功能，`0.0.0` 的源码构建会被当成上古版本，而 ChatGPT 后端也按同一个字符串门控模型 |
 | `thread/resume` | 保持会话创建时的供应商 |
 | `thread/settings/update` | 切到别家供应商的模型被拒绝 |
 | 子代理 spawn | 别家供应商的模型被拒绝（子代理继承父代理供应商） |
@@ -411,7 +412,7 @@ config/                             示例配置片段 + 最小目录模板
 开发期验证：
 
 * `cargo nextest run -p codex-app-server model_provider_routing` —— 8 个用例通过。
-* `codex --version`（以及客户端读的 app-server 握手）报 `0.146.0-alpha.8` 而不是 `0.0.0`，客户端因此不再关闭「分页线程开分支」这类能力。
+* `codex --version`（以及客户端读的 app-server 握手）报 `0.154.0` 而不是 `0.0.0`，客户端因此不再关闭「分页线程开分支」这类能力，后端也不再拒绝 `gpt-6-astra` 这类新模型。
 * `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` 的两个 subagent 用例通过。
 * `routing-e2e.mjs` 对真实引擎：有路由的模型落到其供应商，未路由的保持默认，请求不带模型时按配置
   默认模型路由，显式冲突被拒绝。

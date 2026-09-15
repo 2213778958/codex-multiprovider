@@ -254,7 +254,8 @@ rebuild the engine.
 | OpenAI models missing from the picker | the merged catalog lacks them | re-run `merge-model-catalogs.mjs` against a populated `models_cache.json` |
 | `Patched engine not found` | the build is outside the two `codex-rs\target` locations | `tools\start-desktop-deepseek.ps1 -CodexExe <path>` |
 | `The '<model>' model is not supported when using Codex with a ChatGPT account` | the session started on the default provider while running a routed model; builds before the default-model routing landed did this for threads created without a model, such as `create_thread` delegations | rebuild the engine from a checkout that includes the fix, then recreate the thread |
-| `Forking is not available for threads using paginated history yet`, or new threads flip between `legacy` and `paginated` | the Store client gates paginated forks on the app-server version (`>= 0.146.0-alpha.7`, `>= 0.146.0-alpha.8` for ephemeral forks) and a source build reports `0.0.0` | build from this patch (it pins `0.146.0-alpha.8` in `codex-rs/Cargo.toml`) or raise that version; then restart the client |
+| `Forking is not available for threads using paginated history yet`, or new threads flip between `legacy` and `paginated` | the Store client gates paginated forks on the app-server version (`>= 0.146.0-alpha.7`, `>= 0.146.0-alpha.8` for ephemeral forks) and a source build reports `0.0.0` | build from this patch (it pins the current release line in `codex-rs/Cargo.toml`) or raise that version; then restart the client |
+| `The '<model>' model requires a newer version of Codex` | the ChatGPT backend gates models on the version the engine reports, and a source build reports `0.0.0` (or a pin older than that model's minimum) | build from this patch (it pins `0.154.0`) or raise `codex-rs/Cargo.toml` to the version the model needs, then rebuild and restart the client |
 | `Failed to collect working tree diff` when branching a thread into a new worktree | the client carries the uncommitted diff by staging it in the source repository, which a write-protected repository (ACL deny on the tree or `.git`) refuses | unlock the repository for the duration, start the worktree from a branch/commit instead of the working tree, or branch in the same directory |
 
 Logs: `%USERPROFILE%\.codex\proxy-log.jsonl` (request bodies only with `--body-dir`),
@@ -270,7 +271,7 @@ Logs: `%USERPROFILE%\.codex\proxy-log.jsonl` (request bodies only with `--body-d
 | `thread/settings/update` | switching to another provider's model is rejected |
 | Subagent spawn | a foreign-provider model is rejected (children inherit the parent provider) |
 | Config load | a route naming an unknown provider fails loading |
-| Engine version | `codex-rs/Cargo.toml` reports `0.146.0-alpha.8`; the desktop client gates features on the app-server version and treats a `0.0.0` source build as ancient |
+| Engine version | `codex-rs/Cargo.toml` reports `0.154.0`; the desktop client gates features on the app-server version and treats a `0.0.0` source build as ancient, while the ChatGPT backend gates models on the same string |
 
 ## Reference: proxy
 
@@ -452,7 +453,7 @@ Development verification:
   own `401` shows the masked tail of the stored key, proving the token from `auth.command` reached it.
 * UI: the unmodified Store client's picker lists both providers' models, and a session created from it
   records the second provider in its rollout metadata.
-* `codex --version` (and the app-server handshake the client reads) reports `0.146.0-alpha.8` instead
+* `codex --version` (and the app-server handshake the client reads) reports `0.154.0` instead
   of `0.0.0`, so the client stops gating features like forking paginated threads.
 * `subagent-slot-probe.mjs` reproduces the budget behavior above.
 * `completed_child_wakes_idle_parent` covers both sides of the wake switch.
